@@ -9,6 +9,7 @@ import {
   buildClaudeProjection,
   buildCodexCatalog,
   defaultConfig,
+  disable,
   mergeModelRows,
   modelsUrl,
   normalizeBaseUrl,
@@ -159,4 +160,37 @@ test("syncs a generic local /v1/models provider into isolated target paths", asy
   const claude = JSON.parse(fs.readFileSync(locations.claudeSettings, "utf8"));
   assert.equal(claude.modelPicker.options.length, 1);
   assert.equal(JSON.parse(fs.readFileSync(locations.state, "utf8")).modelIds[0], "local-model");
+});
+
+test("disable restores both host settings after a projection", async (t) => {
+  const server = createServer((request, response) => {
+    response.setHeader("content-type", "application/json");
+    response.end(JSON.stringify({ data: [{ id: "restore-model", context_window: 128000 }] }));
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => server.close());
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "model-list-plugin-restore-"));
+  const locations = {
+    dataRoot: path.join(root, "data"),
+    config: path.join(root, "data", "config.json"),
+    state: path.join(root, "data", "state.json"),
+    lock: path.join(root, "data", "sync.lock"),
+    codexHome: path.join(root, "codex"),
+    codexConfig: path.join(root, "codex", "config.toml"),
+    codexCatalog: path.join(root, "codex", "model-list-plugin-catalog.json"),
+    claudeSettings: path.join(root, "claude", "settings.json"),
+  };
+  const originalClaude = { model: "claude-sonnet-4-6", modelPicker: { replaceBuiltInOptions: false }, env: { KEEP: "1" } };
+  fs.mkdirSync(path.dirname(locations.claudeSettings), { recursive: true });
+  fs.writeFileSync(locations.claudeSettings, JSON.stringify(originalClaude));
+  const config = {
+    ...defaultConfig(),
+    enabled: true,
+    provider: { ...defaultConfig().provider, baseUrl: `http://127.0.0.1:${server.address().port}/v1` },
+  };
+  const result = await syncOnce(config, locations, { version: "0.1.2", managed: {} });
+  disable({ ...config, enabled: false }, locations, result.state);
+  assert.deepEqual(JSON.parse(fs.readFileSync(locations.claudeSettings, "utf8")), originalClaude);
+  assert.equal(fs.existsSync(locations.codexCatalog), false);
+  assert.equal(fs.existsSync(locations.codexConfig), false);
 });
