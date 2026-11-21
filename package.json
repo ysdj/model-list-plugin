@@ -1,6 +1,6 @@
 {
   "name": "model-list-plugin",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "private": true,
   "type": "module",
   "description": "Remote model metadata projection plugin for Codex and Claude Code",

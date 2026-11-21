@@ -15,7 +15,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-export const VERSION = "0.1.2";
+export const VERSION = "0.1.3";
 export const PLUGIN_NAME = "model-list-plugin";
 
 const DEFAULT_CONFIG = {
