@@ -15,7 +15,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-export const VERSION = "0.1.1";
+export const VERSION = "0.1.2";
 export const PLUGIN_NAME = "model-list-plugin";
 
 const DEFAULT_CONFIG = {
@@ -513,7 +513,7 @@ function resolveProvider(config) {
   return {
     baseUrl,
     modelsUrl: modelsUrl(baseUrl),
-    metadataUrl: nonEmptyString(provider.metadataUrl),
+    metadataUrl: nonEmptyString(provider.metadataUrl, process.env.MODEL_LIST_PLUGIN_METADATA_URL),
     kind: isAnthropic ? "anthropic" : "openai",
     authEnv,
     token: hostSettingEnv(authEnv),
