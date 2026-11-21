@@ -85,6 +85,8 @@ node "$CLAUDE_PLUGIN_ROOT/scripts/model-list-plugin.mjs" update --host claude
 node "$PLUGIN_ROOT/scripts/model-list-plugin.mjs" update --host codex
 ```
 
+For Codex, the update sequence refreshes the marketplace and asks Codex to install the selected marketplace version again. For Claude Code, it refreshes the marketplace and invokes the host plugin update command.
+
 Codex or Claude Code may require a new session after an update. Codex can also ask for trust again when a plugin hook changes. The updater never replaces its own installed directory while it is running.
 
 ## Platform and security boundary

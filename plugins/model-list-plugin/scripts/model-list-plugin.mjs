@@ -15,7 +15,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-export const VERSION = "0.1.0";
+export const VERSION = "0.1.1";
 export const PLUGIN_NAME = "model-list-plugin";
 
 const DEFAULT_CONFIG = {
@@ -999,6 +999,7 @@ function updateCommands(host) {
   if (host === "codex") {
     return [
       ["codex", ["plugin", "marketplace", "upgrade", PLUGIN_NAME]],
+      ["codex", ["plugin", "add", `${PLUGIN_NAME}@${PLUGIN_NAME}`]],
     ];
   }
   return [
