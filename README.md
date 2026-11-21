@@ -1,109 +1,43 @@
 # model-list-plugin
 
-`model-list-plugin` keeps the model pickers in Codex and Claude Code aligned with a remote OpenAI or Anthropic compatible `GET /v1/models` endpoint. It can also read a separate read-only metadata endpoint when a gateway publishes context windows, reasoning levels, aliases, or modalities there.
+Synchronize a remote OpenAI-compatible or Anthropic-compatible model list and its available metadata into Codex and Claude Code. The plugin works with Young Router or another compatible provider.
 
-The implementation is a small Node standard-library script inside the plugin. It does not install young-router, npm packages, Python packages, a daemon, a LaunchAgent, a scheduled task, or a background service. The host agent invokes it through its normal plugin hooks on macOS and Windows.
+The plugin includes executables for macOS (Apple Silicon and Intel) and Windows x64. Installation uses the agent's plugin manager and needs no local Young Router, separate runtime, or background service.
 
 ## Install
 
-Install from the public GitHub marketplace in each host you use.
+In Young Router, open **External settings**, select Codex or Claude, and choose **Install** beside **Model list plugin**. The form shows installation status, synchronization and automatic-update switches, settings, and uninstall. Enabling the Young Router API offers to install the plugin.
+
+Alternatively install directly for each agent.
 
 ```sh
-# Claude Code
-claude plugin marketplace add ysdj/model-list-plugin
-claude plugin install model-list-plugin@model-list-plugin
-
-# Codex
 codex plugin marketplace add ysdj/model-list-plugin
 codex plugin add model-list-plugin@model-list-plugin
+claude plugin install model-list-plugin --marketplace ysdj/model-list-plugin --scope user
 ```
 
-The repository also contains a local marketplace checkout, so contributors can validate it without installing anything globally.
-
-```sh
-claude plugin marketplace add .
-codex plugin marketplace add .
-```
-
-Restart the host after the first installation so its hook registry loads the plugin.
+Start a new agent session. Codex may ask you to review and trust the plugin's hooks before it runs them. The first hook enables synchronization for that agent and discovers its provider. Young Router's install action also starts an immediate sync.
 
 ## Configure
 
-The endpoint should be the provider base URL, its `/v1` URL, or its `/v1/models` URL. All three forms are normalized to one `GET /v1/models` request.
+The plugin discovers the selected Codex provider or Claude Code's `ANTHROPIC_BASE_URL` and authentication settings. Set a different base URL, optional metadata URL, and API-key environment variable name in Young Router's plugin settings or using Claude Code's `/model-list-plugin:model-list-configure` command. The URL can end in `/v1` or `/v1/models`. Key values remain in the agent's environment or existing settings.
 
-```sh
-node "$CLAUDE_PLUGIN_ROOT/scripts/model-list-plugin.mjs" configure \
-  --base-url https://gateway.example.com/v1 \
-  --kind auto \
-  --auth-env OPENAI_API_KEY \
-  --targets codex,claude \
-  --claude-alias-mode auto
-```
+Configuration is shared by both agents in `~/Library/Application Support/model-list-plugin/config.json` on macOS or `%APPDATA%/model-list-plugin/config.json` on Windows. Leave provider fields empty for discovery. The executable also supports `--kind auto|openai|anthropic`, `--auth-mode bearer|x-api-key|none`, `--interval SECONDS`, and `--auto-update true|false`.
 
-For Anthropic compatible endpoints use `--kind anthropic` and an environment variable such as `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN`. The key is read for the request and is never written to the plugin configuration, catalog, settings, logs, or Git repository.
-
-An optional metadata endpoint can be configured when `/v1/models` does not carry the fields needed by the pickers.
-
-```sh
-node "$CLAUDE_PLUGIN_ROOT/scripts/model-list-plugin.mjs" configure \
-  --metadata-url https://gateway.example.com/modelcatalog/list
-```
-
-Metadata rows may use `context_window`, `max_context_window`, `effective_context_window_percent`, `supported_efforts`, `default_reasoning_level`, `claude_alias`, `behaves_as`, `mode`, `modalities`, and the equivalent camel-case forms. The plugin also accepts the standard OpenAI `data` array and Anthropic `data` array. Unknown fields are ignored when projecting into either host.
-
-Claude aliases default to `auto`, which uses a valid alias from metadata and otherwise creates a stable `claude-mythos-<hash>` alias. Set `--claude-alias-mode raw` to use the provider's model IDs directly, or `derived` to always generate plugin aliases.
-
-The configuration is stored in the platform user data directory.
-
-- macOS `~/Library/Application Support/model-list-plugin/config.json`
-- Windows `%APPDATA%\\model-list-plugin\\config.json`
-- Linux `$XDG_CONFIG_HOME/model-list-plugin/config.json`, or `~/.config/model-list-plugin/config.json`
-
-`MODEL_LIST_PLUGIN_CONFIG` and `MODEL_LIST_PLUGIN_DATA` override these locations for tests and portable setups.
-
-## Enable, inspect, and disable
-
-```sh
-node "$CLAUDE_PLUGIN_ROOT/scripts/model-list-plugin.mjs" install
-node "$CLAUDE_PLUGIN_ROOT/scripts/model-list-plugin.mjs" enable
-node "$CLAUDE_PLUGIN_ROOT/scripts/model-list-plugin.mjs" status
-node "$CLAUDE_PLUGIN_ROOT/scripts/model-list-plugin.mjs" sync
-node "$CLAUDE_PLUGIN_ROOT/scripts/model-list-plugin.mjs" disable
-```
-
-`enable` fetches and validates a non-empty model list before writing projections. A failed refresh leaves the last usable projection in place and records the error for `status`. `disable` restores the Codex catalog pointer and the Claude Code picker snapshot captured when the plugin was first enabled. `uninstall` removes those local projections and plugin data. The host plugin manager removes the installed plugin files themselves.
-
-Codex receives a catalog at `~/.codex/model-list-plugin-catalog.json` and a `model_catalog_json` pointer in `~/.codex/config.toml`. Native Codex model profiles are read from the installed Codex CLI when available, then remote context and reasoning metadata is overlaid. A generic endpoint therefore works without copying a Linux young-router catalog to the client.
-
-Claude Code receives `modelPicker.options` and per-alias `modelSettings`. A model with a one-million-token context uses the `[1m]` suffix and a matching `autoCompactWindow` entry. `modelPicker` support requires Claude Code 2.1.242 or later. User environment variables, labels, and credentials remain in the host settings.
+The listing can provide context windows, reasoning levels, modalities and aliases. An optional metadata endpoint is matched by model ID and supplements the listing. A service that returns only IDs supplies no context or reasoning details. Young Router must run a version that exposes metadata in its listing. Claude uses provider model IDs by default. The optional `--claude-alias-mode metadata|derived` modes require the provider to accept those aliases.
 
 ## Synchronization and updates
 
-The plugin has no resident process. Codex and Claude Code use `SessionStart` plus `UserPromptSubmit`. The default refresh interval is 60 seconds, which gives near-real-time updates while an agent is open and avoids network work on every prompt. Closing the host stops hook execution, so a new session is the next refresh boundary.
+Hooks run on session start and prompt submission, with a default minimum interval of 60 seconds per agent. Changes are fetched on a later hook invocation. The host may require a new session to reload a changed catalog or plugin version.
 
-Host plugin managers own plugin upgrades. The hook checks once per day by default and runs the corresponding marketplace refresh command. A manual update is available as:
-
-```sh
-node "$CLAUDE_PLUGIN_ROOT/scripts/model-list-plugin.mjs" update --host claude
-node "$PLUGIN_ROOT/scripts/model-list-plugin.mjs" update --host codex
-```
-
-For Codex, the update sequence refreshes the marketplace and asks Codex to install the selected marketplace version again. For Claude Code, it refreshes the marketplace and invokes the host plugin update command.
-
-Codex or Claude Code may require a new session after an update. Codex can also ask for trust again when a plugin hook changes. The updater never replaces its own installed directory while it is running.
-
-## Platform and security boundary
-
-The code uses only URL, filesystem, crypto, and child-process APIs built into Node. It works with the Node runtime supplied by the host plugin system on macOS and Windows. It does not assume a local yr installation, a specific hostname, a provider key name, or a particular model family.
-
-The plugin owns the client-side model-list switch and settings through `install`, `configure`, `enable`, `disable`, `sync`, `update`, and `uninstall`. It does not start, stop, install, or reconfigure a local young-router process. The endpoint is read-only and the optional metadata endpoint is also read-only.
+The plugin asks the host plugin manager to check for updates once per day by default while hooks run. Young Router exposes the automatic-update switch and last error. A failed refresh keeps the previous projection. Disabling restores the previous managed Codex pointer or Claude picker settings and preserves unrelated edits.
 
 ## Development
 
 ```sh
-node --test
+go test ./...
 claude plugin validate .
 claude plugin validate plugins/model-list-plugin
 ```
 
-The GitHub Actions workflow runs the same Node tests on Ubuntu, macOS, and Windows.
+Build with Go 1.24 or later. The marketplace includes the macOS universal and Windows x64 executables under `plugins/model-list-plugin/bin`.

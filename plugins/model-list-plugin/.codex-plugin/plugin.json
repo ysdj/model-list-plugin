@@ -1,6 +1,6 @@
 {
   "name": "model-list-plugin",
-  "version": "0.1.5",
+  "version": "0.2.0",
   "description": "Synchronize remote OpenAI or Anthropic compatible model metadata into Codex and Claude Code.",
   "homepage": "https://github.com/ysdj/model-list-plugin",
   "repository": "https://github.com/ysdj/model-list-plugin",
@@ -12,8 +12,8 @@
           "hooks": [
             {
               "type": "command",
-              "command": "node \"${PLUGIN_ROOT}/scripts/model-list-plugin.mjs\" hook --host codex",
-              "commandWindows": "node \"${PLUGIN_ROOT}\\scripts\\model-list-plugin.mjs\" hook --host codex"
+              "command": "\"${PLUGIN_ROOT}/bin/model-list-plugin\" hook --host codex",
+              "commandWindows": "\"${PLUGIN_ROOT}\\bin\\model-list-plugin.exe\" hook --host codex"
             }
           ]
         }
@@ -23,8 +23,8 @@
           "hooks": [
             {
               "type": "command",
-              "command": "node \"${PLUGIN_ROOT}/scripts/model-list-plugin.mjs\" hook --host codex",
-              "commandWindows": "node \"${PLUGIN_ROOT}\\scripts\\model-list-plugin.mjs\" hook --host codex"
+              "command": "\"${PLUGIN_ROOT}/bin/model-list-plugin\" hook --host codex",
+              "commandWindows": "\"${PLUGIN_ROOT}\\bin\\model-list-plugin.exe\" hook --host codex"
             }
           ]
         }

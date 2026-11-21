@@ -6,13 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node",
-            "args": [
-              "${CLAUDE_PLUGIN_ROOT}/scripts/model-list-plugin.mjs",
-              "hook",
-              "--host",
-              "claude"
-            ],
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/scripts/run.sh\" hook --host claude",
             "timeout": 20
           }
         ]
@@ -23,13 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node",
-            "args": [
-              "${CLAUDE_PLUGIN_ROOT}/scripts/model-list-plugin.mjs",
-              "hook",
-              "--host",
-              "claude"
-            ],
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/scripts/run.sh\" hook --host claude",
             "timeout": 20
           }
         ]
