@@ -26,9 +26,14 @@ func TestFirstHookEnablesEachHostAndRespectsDisable(t *testing.T) {
 	defer server.Close()
 	root := t.TempDir()
 	t.Setenv("MODEL_LIST_PLUGIN_DATA", filepath.Join(root, "data"))
-	t.Setenv("MODEL_LIST_PLUGIN_BASE_URL", server.URL)
 	t.Setenv("CODEX_HOME", filepath.Join(root, "codex"))
 	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(root, "claude"))
+	if err := writeFile(filepath.Join(root, "codex", "config.toml"), []byte("model_provider = 'test'\n[model_providers.test]\nbase_url = '"+server.URL+"'\n")); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeJSON(filepath.Join(root, "claude", "settings.json"), map[string]any{"env": map[string]string{"ANTHROPIC_BASE_URL": server.URL}}); err != nil {
+		t.Fatal(err)
+	}
 	loc, err := locationsFor()
 	if err != nil {
 		t.Fatal(err)
@@ -104,7 +109,7 @@ func TestFreshConfiguredHostStartsOnFirstHook(t *testing.T) {
 		_, _ = w.Write([]byte(`{"data":[{"id":"example"}]}`))
 	}))
 	defer server.Close()
-	if err := run([]string{"configure", "--base-url", server.URL}); err != nil {
+	if err := writeFile(filepath.Join(root, "codex", "config.toml"), []byte("model_provider = 'test'\n[model_providers.test]\nbase_url = '"+server.URL+"'\n")); err != nil {
 		t.Fatal(err)
 	}
 	loc, err := locationsFor()
@@ -215,17 +220,16 @@ func TestSyncAndRestorePreservesOtherChanges(t *testing.T) {
 	}))
 	defer server.Close()
 	loc := testLocations(t)
-	originalConfig := "model = \"remote-model\"\n[model_providers.test]\nbase_url = \"http://localhost\"\n"
+	originalConfig := "model = \"remote-model\"\nmodel_provider = \"test\"\n[model_providers.test]\nbase_url = \"" + server.URL + "\"\n"
 	if err := writeFile(loc.CodexConfig, []byte(originalConfig)); err != nil {
 		t.Fatal(err)
 	}
-	originalSettings := map[string]any{"env": map[string]string{"KEEP": "yes"}, "modelPicker": map[string]any{"options": []any{}}, "modelSettings": map[string]any{"remote-model": map[string]any{"autoCompactWindow": 140000, "other": "before"}}}
+	originalSettings := map[string]any{"env": map[string]string{"KEEP": "yes", "ANTHROPIC_BASE_URL": server.URL}, "modelPicker": map[string]any{"options": []any{}}, "modelSettings": map[string]any{"remote-model": map[string]any{"autoCompactWindow": 140000, "other": "before"}}}
 	if err := writeJSON(loc.ClaudeSettings, originalSettings); err != nil {
 		t.Fatal(err)
 	}
 	cfg := defaultConfig()
 	cfg.Enabled = true
-	cfg.Provider.BaseURL = server.URL
 	saved := state{}
 	count, err := syncModels(cfg, loc, &saved, "")
 	if err != nil || count != 1 {
@@ -265,11 +269,13 @@ func TestSyncRollsBackOnInvalidClaudeSettings(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(`{"data":[{"id":"m"}]}`)) }))
 	defer server.Close()
 	loc := testLocations(t)
+	if err := writeFile(loc.CodexConfig, []byte("model_provider = 'test'\n[model_providers.test]\nbase_url = '"+server.URL+"'\n")); err != nil {
+		t.Fatal(err)
+	}
 	if err := writeFile(loc.ClaudeSettings, []byte("{")); err != nil {
 		t.Fatal(err)
 	}
 	cfg := defaultConfig()
-	cfg.Provider.BaseURL = server.URL
 	saved := state{}
 	if _, err := syncModels(cfg, loc, &saved, ""); err == nil {
 		t.Fatal("expected invalid settings error")
@@ -327,7 +333,7 @@ func TestHostEnableDisableAndFailure(t *testing.T) {
 		_, _ = w.Write([]byte("{\"data\":[{\"id\":\"example\",\"context_window\":128000}]}"))
 	}))
 	defer server.Close()
-	if err := run([]string{"configure", "--base-url", server.URL}); err != nil {
+	if err := writeFile(filepath.Join(root, "codex", "config.toml"), []byte("model_provider = 'test'\n[model_providers.test]\nbase_url = '"+server.URL+"'\n")); err != nil {
 		t.Fatal(err)
 	}
 	if err := run([]string{"enable", "--host", "codex"}); err != nil {
@@ -340,6 +346,9 @@ func TestHostEnableDisableAndFailure(t *testing.T) {
 	}
 	if _, err := os.Stat(loc.ClaudeSettings); !os.IsNotExist(err) {
 		t.Fatalf("Claude modified: %v", err)
+	}
+	if err := writeJSON(filepath.Join(root, "claude", "settings.json"), map[string]any{"env": map[string]string{"ANTHROPIC_BASE_URL": server.URL}}); err != nil {
+		t.Fatal(err)
 	}
 	if err := run([]string{"enable", "--host", "claude"}); err != nil {
 		t.Fatal(err)
@@ -378,9 +387,95 @@ func TestCodexProviderDiscovery(t *testing.T) {
 	if err := writeFile(loc.CodexConfig, []byte("model_provider = 'example'\n[model_providers.example]\nbase_url = 'https://example.test/v1'\nenv_key = 'EXAMPLE_CATALOG_KEY'\n")); err != nil {
 		t.Fatal(err)
 	}
-	p, key := resolveProvider(defaultConfig(), loc, "claude")
-	if p.BaseURL != "https://example.test/v1" || p.AuthEnv != "EXAMPLE_CATALOG_KEY" || key != "secret" {
-		t.Fatalf("provider: %+v", p)
+	p, key, err := resolveProvider(loc, "codex")
+	if err != nil || p.BaseURL != "https://example.test/v1" || p.AuthEnv != "EXAMPLE_CATALOG_KEY" || key != "secret" {
+		t.Fatalf("provider: %+v, error: %v", p, err)
+	}
+}
+
+func TestClientSourcesIgnorePluginOverrides(t *testing.T) {
+	loc := testLocations(t)
+	t.Setenv("MODEL_LIST_PLUGIN_BASE_URL", "https://obsolete.example.test")
+	t.Setenv("ANTHROPIC_BASE_URL", "https://old-session.example.test")
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "fixture-old-session-key")
+	if err := writeFile(loc.CodexConfig, []byte(`model_provider = 'selected'
+[model_providers.other]
+base_url = 'https://other.example.test/v1'
+[model_providers.selected]
+base_url = 'https://codex.example.test/v1'
+model_catalog_url = 'https://codex.example.test/catalog'
+experimental_bearer_token = 'fixture-codex-key'
+`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeFile(loc.ClaudeSettings, []byte(`{"env":{"ANTHROPIC_BASE_URL":"https://claude.example.test","ANTHROPIC_API_KEY":"fixture-claude-key"}}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeFile(loc.Config, []byte(`{"enabled":true,"provider":{"baseUrl":"https://obsolete.example.test"}}`)); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadConfig(loc.Config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct{ host, base, catalog, mode, key string }{
+		{"codex", "https://codex.example.test/v1", "https://codex.example.test/catalog", "bearer", "fixture-codex-key"},
+		{"claude", "https://claude.example.test", "", "x-api-key", "fixture-claude-key"},
+	} {
+		p, key, err := resolveProvider(loc, test.host)
+		if err != nil || p.BaseURL != test.base || p.MetadataURL != test.catalog || p.authMode() != test.mode || key != test.key {
+			t.Fatalf("%s did not follow its selected provider: %+v, %v", test.host, p, err)
+		}
+	}
+	output, err := json.Marshal(status(cfg, loc, state{}, ""))
+	if err != nil || strings.Contains(string(output), "obsolete.example.test") || strings.Contains(string(output), "fixture-") {
+		t.Fatal("status includes a retired provider or a credential")
+	}
+	if err := writeFile(loc.ClaudeSettings, []byte(`{"env":{"ANTHROPIC_BASE_URL":"https://claude.example.test"}}`)); err != nil {
+		t.Fatal(err)
+	}
+	if _, key, err := resolveProvider(loc, "claude"); err != nil || key != "" {
+		t.Fatal("the new Claude endpoint inherited a credential from the old session")
+	}
+}
+
+func TestCatalogOnlyProvider(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/catalog" {
+			_, _ = w.Write([]byte(`{"models":[{"slug":"catalog-model","context_window":120000}]}`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+	models, err := fetchCatalog(context.Background(), provider{BaseURL: server.URL, MetadataURL: server.URL + "/catalog"}, "")
+	if err != nil || len(models) != 1 || models[0].ID != "catalog-model" || models[0].Window != 120000 {
+		t.Fatalf("catalog model: %+v, %v", models, err)
+	}
+}
+
+func TestPublishedContextWinsAndMissingContextUsesPublicCatalogs(t *testing.T) {
+	parse := func(data string) any {
+		t.Helper()
+		var value any
+		if err := json.Unmarshal([]byte(data), &value); err != nil {
+			t.Fatal(err)
+		}
+		return value
+	}
+	listing, _ := rows(parse(`{"data":[{"id":"public-name","context_window":48000,"max_context_window":48000,"effective_context_window_percent":95},{"id":"bedrock.example@stable"},{"id":"listed-without-context"}]}`))
+	metadata, _ := rows(parse(`{"models":[{"slug":"public-name","context_window":200000,"max_context_window":250000,"default_reasoning_effort":"high","supported_reasoning_levels":["low","high"]}]}`))
+	cache := publicCache{Catalogs: [len(publicSources)]map[string]model{
+		publicRecords(parse(`{"a":{"example":{"id":"example","contextWindow":100000}},"b":{"example":{"id":"example","contextWindow":95000}}}`), publicSources[0]),
+		publicRecords(parse(`{"models":[{"slug":"public-name","context_window":200000},{"slug":"listed-without-context","context_window":190000,"max_context_window":300000}]}`), publicSources[1]),
+		publicRecords(parse(`{"vendor/example":{"limit":{"context":80000,"input":160000}}}`), publicSources[2]),
+	}}
+	models := fillPublicContexts(normalize(listing, metadata), cache)
+	if len(models) != 3 || models[0].Window != 48000 || models[0].MaxWindow != 48000 || models[0].DefaultEffort != "high" {
+		t.Fatalf("API window lost while merging metadata: %+v", models)
+	}
+	if models[1].Window != 95000 || models[2].Window != 190000 || models[2].MaxWindow != 300000 {
+		t.Fatalf("public context did not follow catalog precedence: %+v", models)
 	}
 }
 
@@ -389,7 +484,7 @@ func TestMigrateHostData(t *testing.T) {
 	old := t.TempDir()
 	t.Setenv("CLAUDE_PLUGIN_DATA", old)
 	t.Setenv("PLUGIN_DATA", "")
-	if err := writeJSON(filepath.Join(old, "config.json"), config{Enabled: true, Targets: targets{Codex: true}, Provider: provider{BaseURL: "https://example.test"}}); err != nil {
+	if err := writeFile(filepath.Join(old, "config.json"), []byte(`{"enabled":true,"targets":{"codex":true},"provider":{"baseUrl":"https://example.test"}}`)); err != nil {
 		t.Fatal(err)
 	}
 	if err := writeJSON(filepath.Join(old, "state.json"), state{ModelIDs: []string{"example"}}); err != nil {
@@ -399,7 +494,7 @@ func TestMigrateHostData(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg, err := loadConfig(loc.Config)
-	if err != nil || !cfg.Enabled || cfg.Provider.BaseURL != "https://example.test" {
+	if err != nil || !cfg.Enabled {
 		t.Fatalf("config: %+v %v", cfg, err)
 	}
 	saved, err := loadState(loc.State)

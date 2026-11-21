@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -66,6 +67,7 @@ func syncModels(cfg config, loc locations, saved *state, host string) (int, erro
 	ctx, cancel := context.WithTimeout(context.Background(), 17*time.Second)
 	defer cancel()
 	modelsByHost := make(map[string][]model)
+	var public *publicCache
 	for _, target := range []struct {
 		name    string
 		enabled bool
@@ -73,8 +75,21 @@ func syncModels(cfg config, loc locations, saved *state, host string) (int, erro
 		if !target.enabled || (host != "" && host != target.name) {
 			continue
 		}
-		p, key := resolveProvider(cfg, loc, target.name)
-		models, err := fetchCatalog(ctx, p, key)
+		p, key, err := resolveProvider(loc, target.name)
+		var models []model
+		if err == nil {
+			models, err = fetchCatalog(ctx, p, key)
+		}
+		if err == nil && slices.ContainsFunc(models, func(m model) bool { return m.Window == 0 }) {
+			if public == nil {
+				loaded := loadPublicContexts(ctx, loc.Data)
+				public = &loaded
+			}
+			models = fillPublicContexts(models, *public)
+			if len(models) == 0 {
+				err = errors.New("provider returned no conversation models")
+			}
+		}
 		if err != nil {
 			saved.LastError = err.Error()
 			if saveErr := writeJSON(loc.State, saved); saveErr != nil {
@@ -147,8 +162,7 @@ func disable(cfg config, loc locations, saved *state) error {
 	})
 }
 
-func status(cfg config, loc locations, saved state) object {
-	p, key := resolveProvider(cfg, loc, "")
+func status(cfg config, loc locations, saved state, host string) object {
 	safeURL := func(value string) string {
 		if value == "" {
 			return ""
@@ -160,10 +174,21 @@ func status(cfg config, loc locations, saved state) object {
 		u.RawQuery = ""
 		return u.String()
 	}
+	sources := object{}
+	for _, name := range []string{"codex", "claude"} {
+		if host != "" && host != name {
+			continue
+		}
+		p, key, err := resolveProvider(loc, name)
+		source := object{"baseUrl": safeURL(p.BaseURL), "catalogUrl": safeURL(p.MetadataURL), "authConfigured": key != ""}
+		if err != nil {
+			source["error"] = err.Error()
+		}
+		sources[name] = source
+	}
 	return object{"version": version, "enabled": cfg.Enabled, "targets": cfg.Targets,
 		"syncIntervalSeconds": cfg.SyncIntervalSeconds,
-		"configuredProvider":  cfg.Provider,
-		"provider":            object{"baseUrl": safeURL(p.BaseURL), "metadataUrl": safeURL(p.MetadataURL), "kind": p.Kind, "authEnv": p.AuthEnv, "authConfigured": key != ""},
+		"sources":             sources,
 		"lastSyncAt":          saved.LastSyncAt, "lastSyncAtByTarget": saved.LastSyncAtByTarget, "lastError": saved.LastError, "modelCount": len(saved.ModelIDs), "modelIds": saved.ModelIDs,
 		"lastUpdateCheckAtByHost": saved.LastUpdateCheckAtByHost, "lastUpdateErrorByHost": saved.LastUpdateErrorByHost,
 		"paths": object{"config": loc.Config, "dataRoot": loc.Data, "codexCatalog": loc.CodexCatalog, "codexConfig": loc.CodexConfig, "claudeSettings": loc.ClaudeSettings}}
@@ -191,72 +216,6 @@ func parseArgs(args []string) (string, map[string]string, error) {
 		options[name] = value
 	}
 	return command, options, nil
-}
-
-func setConfig(cfg config, args map[string]string) (config, error) {
-	if value, ok := args["base-url"]; ok {
-		if value != "" {
-			if _, err := endpoint(value); err != nil {
-				return cfg, err
-			}
-		}
-		cfg.Provider.BaseURL = strings.TrimRight(value, "/")
-	}
-	if value, ok := args["metadata-url"]; ok {
-		if value != "" {
-			if _, err := endpoint(value); err != nil {
-				return cfg, err
-			}
-		}
-		cfg.Provider.MetadataURL = value
-	}
-	if value, ok := args["kind"]; ok {
-		if value != "auto" && value != "openai" && value != "anthropic" {
-			return cfg, errors.New("kind must be auto, openai, or anthropic")
-		}
-		cfg.Provider.Kind = value
-	}
-	if value, ok := args["auth-env"]; ok {
-		cfg.Provider.AuthEnv = value
-	}
-	if value, ok := args["auth-mode"]; ok {
-		if value != "" && value != "bearer" && value != "x-api-key" && value != "none" {
-			return cfg, errors.New("auth-mode must be bearer, x-api-key, or none")
-		}
-		cfg.Provider.AuthMode = value
-	}
-	if value, ok := args["anthropic-version"]; ok {
-		cfg.Provider.AnthropicVersion = value
-	}
-	if value, ok := args["interval"]; ok {
-		n, err := strconv.Atoi(value)
-		if err != nil || n < 0 {
-			return cfg, errors.New("interval must be a non-negative integer")
-		}
-		cfg.SyncIntervalSeconds = n
-	}
-	if value, ok := args["claude-alias-mode"]; ok {
-		if value != "raw" && value != "auto" && value != "metadata" && value != "derived" {
-			return cfg, errors.New("claude-alias-mode must be raw, metadata, or derived")
-		}
-		cfg.ClaudeAliasMode = value
-	}
-	if value, ok := args["targets"]; ok {
-		next := targets{}
-		for _, target := range strings.Split(value, ",") {
-			switch strings.TrimSpace(target) {
-			case "codex":
-				next.Codex = true
-			case "claude":
-				next.Claude = true
-			default:
-				return cfg, errors.New("targets must contain codex, claude, or both")
-			}
-		}
-		cfg.Targets = next
-		cfg.InitializedTargets = map[string]bool{"codex": true, "claude": true}
-	}
-	return cfg, nil
 }
 
 func hostExecutable(host string) string {
@@ -375,8 +334,15 @@ func run(args []string) error {
 		return err
 	}
 	if command == "help" || options["help"] == "true" {
-		fmt.Printf("model-list-plugin %s\nCommands: install configure enable disable sync status update uninstall hook\nOptions: --base-url URL --metadata-url URL --kind auto|openai|anthropic --auth-env NAME --auth-mode bearer|x-api-key|none --targets codex,claude --interval SECONDS\n", version)
+		fmt.Printf("model-list-plugin %s\nCommands: install enable disable sync status update uninstall hook\nOptions: --host codex|claude --force --defer\n", version)
 		return nil
+	}
+	for option := range options {
+		switch option {
+		case "host", "force", "defer", "parent-pid":
+		default:
+			return fmt.Errorf("unknown option --%s", option)
+		}
 	}
 	loc, err := locationsFor()
 	if err != nil {
@@ -448,33 +414,13 @@ func run(args []string) error {
 				return err
 			}
 		}
-		printJSON(status(cfg, loc, saved))
-	case "configure":
-		next, err := setConfig(cfg, options)
-		if err != nil {
-			return err
-		}
-		if err := transaction(loc, func() error {
-			if !next.Targets.Codex {
-				if err := restoreCodex(loc, &saved.Managed); err != nil {
-					return err
-				}
-			}
-			if !next.Targets.Claude {
-				if err := restoreClaude(loc, &saved.Managed); err != nil {
-					return err
-				}
-			}
-			if err := writeJSON(loc.State, saved); err != nil {
-				return err
-			}
-			return writeJSON(loc.Config, next)
-		}); err != nil {
-			return err
-		}
-		printJSON(status(next, loc, saved))
+		printJSON(status(cfg, loc, saved, options["host"]))
 	case "status":
-		printJSON(status(cfg, loc, saved))
+		host := options["host"]
+		if host != "" && host != "codex" && host != "claude" {
+			return errors.New("host must be codex or claude")
+		}
+		printJSON(status(cfg, loc, saved, host))
 	case "enable":
 		host := options["host"]
 		if host != "" && host != "codex" && host != "claude" {
@@ -499,7 +445,7 @@ func run(args []string) error {
 			if err := writeJSON(loc.Config, cfg); err != nil {
 				return err
 			}
-			printJSON(status(cfg, loc, saved))
+			printJSON(status(cfg, loc, saved, host))
 			return nil
 		}
 		var count int
@@ -514,7 +460,7 @@ func run(args []string) error {
 		if err != nil {
 			return err
 		}
-		printJSON(object{"enabled": true, "modelCount": count, "status": status(cfg, loc, saved)})
+		printJSON(object{"enabled": true, "modelCount": count, "status": status(cfg, loc, saved, host)})
 	case "disable":
 		host := options["host"]
 		if host != "" {
@@ -545,7 +491,7 @@ func run(args []string) error {
 			}); err != nil {
 				return err
 			}
-			printJSON(status(cfg, loc, saved))
+			printJSON(status(cfg, loc, saved, host))
 			return nil
 		}
 		if err := disable(cfg, loc, &saved); err != nil {
@@ -564,7 +510,7 @@ func run(args []string) error {
 		if err != nil {
 			return err
 		}
-		printJSON(object{"synced": true, "modelCount": count, "status": status(cfg, loc, saved)})
+		printJSON(object{"synced": true, "modelCount": count, "status": status(cfg, loc, saved, host)})
 	case "uninstall":
 		if err := disable(cfg, loc, &saved); err != nil {
 			return err

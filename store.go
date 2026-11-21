@@ -13,7 +13,7 @@ import (
 	"github.com/pelletier/go-toml/v2"
 )
 
-const version = "0.2.1"
+const version = "0.2.2"
 const pluginName = "model-list-plugin"
 
 type targets struct {
@@ -25,13 +25,12 @@ type config struct {
 	Enabled             bool            `json:"enabled"`
 	Targets             targets         `json:"targets"`
 	InitializedTargets  map[string]bool `json:"initializedTargets"`
-	Provider            provider        `json:"provider"`
 	ClaudeAliasMode     string          `json:"claudeAliasMode"`
 	SyncIntervalSeconds int             `json:"syncIntervalSeconds"`
 }
 
 func defaultConfig() config {
-	return config{Targets: targets{true, true}, InitializedTargets: map[string]bool{}, Provider: provider{Kind: "auto", AnthropicVersion: "2023-06-01"}, ClaudeAliasMode: "raw", SyncIntervalSeconds: 60}
+	return config{Targets: targets{true, true}, InitializedTargets: map[string]bool{}, ClaudeAliasMode: "raw", SyncIntervalSeconds: 60}
 }
 
 type codexState struct {
@@ -248,77 +247,90 @@ func acquireLock(path string, wait time.Duration) (func(), error) {
 	}
 }
 
-func settingsEnv(path, name string) string {
-	if value := strings.TrimSpace(os.Getenv(name)); value != "" {
-		return value
-	}
-	var settings struct {
-		Env map[string]string `json:"env"`
-	}
-	if readJSON(path, &settings) == nil {
-		return strings.TrimSpace(settings.Env[name])
-	}
-	return ""
-}
-
-func codexProvider(path string) (string, string) {
+func codexProvider(path string) (provider, string, error) {
 	data, err := os.ReadFile(path)
-	if err != nil {
-		return "", ""
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return provider{}, "", errors.New("could not read Codex config.toml")
 	}
 	var document struct {
 		ModelProvider  string `toml:"model_provider"`
 		OpenAIBaseURL  string `toml:"openai_base_url"`
 		ModelProviders map[string]struct {
-			BaseURL string `toml:"base_url"`
-			EnvKey  string `toml:"env_key"`
+			BaseURL                 string `toml:"base_url"`
+			EnvKey                  string `toml:"env_key"`
+			ModelCatalogURL         string `toml:"model_catalog_url"`
+			ExperimentalBearerToken string `toml:"experimental_bearer_token"`
+			RequiresOpenAIAuth      bool   `toml:"requires_openai_auth"`
 		} `toml:"model_providers"`
 	}
 	if toml.Unmarshal(data, &document) != nil {
-		return "", ""
+		return provider{}, "", errors.New("Codex config.toml is not valid TOML")
 	}
-	selected := document.ModelProviders[document.ModelProvider]
-	return first(selected.BaseURL, document.OpenAIBaseURL), selected.EnvKey
+	selectedID := first(document.ModelProvider, "openai")
+	selected := document.ModelProviders[selectedID]
+	result := provider{
+		BaseURL:     selected.BaseURL,
+		Kind:        "openai",
+		AuthEnv:     selected.EnvKey,
+		AuthMode:    "bearer",
+		MetadataURL: selected.ModelCatalogURL,
+	}
+	if selectedID == "openai" {
+		result.BaseURL = first(document.OpenAIBaseURL, os.Getenv("OPENAI_BASE_URL"))
+	}
+	if result.AuthEnv != "" {
+		key := strings.TrimSpace(os.Getenv(result.AuthEnv))
+		if key == "" {
+			return result, "", errors.New("the selected Codex provider's API key environment variable is empty")
+		}
+		return result, key, nil
+	}
+	if selected.ExperimentalBearerToken != "" {
+		return result, strings.TrimSpace(selected.ExperimentalBearerToken), nil
+	}
+	if selected.RequiresOpenAIAuth || selectedID == "openai" {
+		if key := first(os.Getenv("OPENAI_API_KEY")); key != "" {
+			return result, key, nil
+		}
+		var auth struct {
+			APIKey string `json:"OPENAI_API_KEY"`
+		}
+		if err := readJSON(filepath.Join(filepath.Dir(path), "auth.json"), &auth); err != nil {
+			return result, "", errors.New("could not read the API key from Codex auth.json")
+		}
+		return result, first(auth.APIKey), nil
+	}
+	return result, "", nil
 }
 
-func resolveProvider(cfg config, loc locations, host string) (provider, string) {
-	p := cfg.Provider
-	anthropicKey := first(settingsEnv(loc.ClaudeSettings, "ANTHROPIC_AUTH_TOKEN"), settingsEnv(loc.ClaudeSettings, "ANTHROPIC_API_KEY"))
-	openAIKey := settingsEnv(loc.ClaudeSettings, "OPENAI_API_KEY")
-	p.BaseURL = first(p.BaseURL, os.Getenv("MODEL_LIST_PLUGIN_BASE_URL"))
-	if p.BaseURL == "" && host == "codex" {
-		base, envKey := codexProvider(loc.CodexConfig)
-		p.BaseURL = base
-		p.AuthEnv = first(p.AuthEnv, envKey)
-	}
-	if p.BaseURL == "" && p.Kind == "anthropic" {
-		p.BaseURL = settingsEnv(loc.ClaudeSettings, "ANTHROPIC_BASE_URL")
-	}
-	p.BaseURL = first(p.BaseURL, settingsEnv(loc.ClaudeSettings, "OPENAI_BASE_URL"), settingsEnv(loc.ClaudeSettings, "ANTHROPIC_BASE_URL"), os.Getenv("YOUNG_ROUTER_BASE_URL"))
-	p.MetadataURL = first(p.MetadataURL, os.Getenv("MODEL_LIST_PLUGIN_METADATA_URL"))
-	p.AuthEnv = first(p.AuthEnv, os.Getenv("MODEL_LIST_PLUGIN_AUTH_ENV"))
-	if p.BaseURL == "" && p.Kind != "anthropic" {
-		base, envKey := codexProvider(loc.CodexConfig)
-		p.BaseURL = base
-		p.AuthEnv = first(p.AuthEnv, envKey)
-	}
-	if p.AuthEnv == "" {
-		if host != "codex" && (p.Kind == "anthropic" || (p.Kind == "auto" && anthropicKey != "" && openAIKey == "")) {
-			if settingsEnv(loc.ClaudeSettings, "ANTHROPIC_AUTH_TOKEN") != "" {
-				p.AuthEnv = "ANTHROPIC_AUTH_TOKEN"
-			} else {
-				p.AuthEnv = "ANTHROPIC_API_KEY"
-			}
-		} else {
-			p.AuthEnv = "OPENAI_API_KEY"
+func resolveProvider(loc locations, host string) (provider, string, error) {
+	switch host {
+	case "codex":
+		return codexProvider(loc.CodexConfig)
+	case "claude":
+		var settings struct {
+			Env map[string]string `json:"env"`
 		}
-	}
-	key := settingsEnv(loc.ClaudeSettings, p.AuthEnv)
-	if host == "codex" && os.Getenv(p.AuthEnv) == "" {
-		var auth map[string]any
-		if readJSON(filepath.Join(filepath.Dir(loc.CodexConfig), "auth.json"), &auth) == nil {
-			key = first(text(auth[p.AuthEnv]), text(auth["OPENAI_API_KEY"]), key)
+		if err := readJSON(loc.ClaudeSettings, &settings); err != nil {
+			return provider{}, "", errors.New("could not read Claude Code settings.json")
 		}
+		configured := strings.TrimRight(first(settings.Env["ANTHROPIC_BASE_URL"]), "/")
+		inherited := strings.TrimRight(first(os.Getenv("ANTHROPIC_BASE_URL")), "/")
+		result := provider{BaseURL: first(configured, inherited), Kind: "anthropic", AuthMode: "x-api-key"}
+		token := first(settings.Env["ANTHROPIC_AUTH_TOKEN"])
+		apiKey := first(settings.Env["ANTHROPIC_API_KEY"])
+		// A hook can inherit values from a session started before the user
+		// changed gateways. Never send that session's key to the new URL.
+		if token == "" && apiKey == "" && (inherited == "" || configured == "" || inherited == configured) {
+			token = first(os.Getenv("ANTHROPIC_AUTH_TOKEN"))
+			apiKey = first(os.Getenv("ANTHROPIC_API_KEY"))
+		}
+		if token != "" {
+			result.AuthMode = "anthropic-token"
+			return result, token, nil
+		}
+		return result, apiKey, nil
+	default:
+		return provider{}, "", errors.New("host must be codex or claude")
 	}
-	return p, key
 }

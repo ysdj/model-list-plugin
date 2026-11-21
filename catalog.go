@@ -179,8 +179,7 @@ func rows(payload any) ([]modelRow, bool) {
 	return nil, false
 }
 
-// Fill only fields that the provider actually supplies. The supplemental catalog
-// is processed first and the listing fills its gaps, leaving IDs and order intact.
+// Fill only fields the source supplies, leaving higher-priority values intact.
 func (m *model) read(row object) {
 	parts := []object{row}
 	for _, key := range []string{"metadata", "model_info", "modelInfo", "model_context", "modelContext", "capabilities", "context", "limit", "limits", "architecture"} {
@@ -214,7 +213,7 @@ func (m *model) read(row object) {
 		}
 		reasoning := asObject(p["reasoning"])
 		if m.DefaultEffort == "" {
-			m.DefaultEffort = canonEffort(field(p, "default_reasoning_level", "defaultReasoningLevel", "default_effort", "defaultEffort", "reasoning_effort", "reasoningEffort"))
+			m.DefaultEffort = canonEffort(field(p, "default_reasoning_level", "defaultReasoningLevel", "default_reasoning_effort", "default_effort", "defaultEffort", "reasoning_effort", "reasoningEffort"))
 			if m.DefaultEffort == "" {
 				m.DefaultEffort = canonEffort(field(reasoning, "default", "default_effort", "defaultEffort", "effort"))
 			}
@@ -231,13 +230,32 @@ func (m *model) read(row object) {
 					m.Efforts = effortList(reasoning[key])
 				}
 			}
+			if m.Efforts == nil {
+				mapping := asObject(p["thinkingLevelMap"])
+				if mapping == nil {
+					mapping = asObject(p["thinking_level_map"])
+				}
+				for _, level := range efforts {
+					name := level
+					if level == "none" {
+						name = "off"
+					}
+					if text(mapping[name]) != "" {
+						m.Efforts = append(m.Efforts, level)
+					}
+				}
+			}
 			if m.Efforts == nil && (p["reasoning"] == true || p["supports_reasoning"] == true) {
 				m.Efforts = []string{"low", "medium", "high"}
 			}
 		}
 		if m.Inputs == nil {
-			for _, key := range []string{"input_modalities", "inputModalities", "modalities"} {
-				for _, input := range values(p[key]) {
+			for _, key := range []string{"input_modalities", "inputModalities", "modalities", "input"} {
+				items := p[key]
+				if key == "modalities" && asObject(items) != nil {
+					items = asObject(items)["input"]
+				}
+				for _, input := range values(items) {
 					name := strings.ToLower(text(input))
 					if (name == "text" || name == "image") && !slices.Contains(m.Inputs, name) {
 						m.Inputs = append(m.Inputs, name)
@@ -261,6 +279,9 @@ func nonChat(p object) bool {
 	}
 	chatMode := false
 	specialMode := false
+	if modalities := asObject(p["modalities"]); modalities != nil && nonChat(object{"output_modalities": modalities["output"]}) {
+		return true
+	}
 	for _, key := range []string{"mode", "modes", "task", "type", "model_type", "modelType", "generation_type", "output_modalities", "outputModalities"} {
 		special := false
 		for _, value := range values(p[key]) {
@@ -277,9 +298,9 @@ func nonChat(p object) bool {
 }
 
 func normalize(list, metadata []modelRow) []model {
-	byID := make(map[string][]object, len(metadata))
+	byID := make(map[string]object, len(metadata))
 	for _, row := range metadata {
-		byID[row.id] = append(byID[row.id], row.fields)
+		byID[row.id] = row.fields
 	}
 	var result []model
 	seen := make(map[string]bool, len(list))
@@ -289,10 +310,14 @@ func normalize(list, metadata []modelRow) []model {
 		}
 		seen[row.id] = true
 		m := model{ID: row.id}
-		for _, supplemental := range byID[row.id] {
-			m.read(supplemental)
-		}
 		m.read(row.fields)
+		if fields := byID[row.id]; fields != nil && !m.NonChat {
+			window, maximum, percent := m.Window, m.MaxWindow, m.EffectivePercent
+			m.read(fields)
+			if window != 0 || maximum != 0 {
+				m.Window, m.MaxWindow, m.EffectivePercent = window, maximum, percent
+			}
+		}
 		m.Label = first(m.Label, m.ID)
 		if m.Window == 0 {
 			m.Window = m.MaxWindow
@@ -385,7 +410,7 @@ func fetchJSON(ctx context.Context, u *url.URL, auth, key, anthropicVersion stri
 func fetchCatalog(ctx context.Context, p provider, key string) ([]model, error) {
 	base, err := endpoint(p.BaseURL)
 	if err != nil {
-		return nil, fmt.Errorf("set a provider URL with configure --base-url: %w", err)
+		return nil, fmt.Errorf("the client configuration needs a model API URL: %w", err)
 	}
 	u := listingURL(base)
 	auth := p.authMode()
@@ -393,11 +418,12 @@ func fetchCatalog(ctx context.Context, p provider, key string) ([]model, error) 
 	cursors := map[string]bool{}
 	for {
 		payload, status, err := fetchJSON(ctx, u, auth, key, p.AnthropicVersion)
-		if err != nil && len(list) == 0 && p.Kind == "auto" && p.AuthMode == "" && key != "" && (status == 401 || status == 403) && auth == "bearer" {
-			auth = "x-api-key"
-			payload, _, err = fetchJSON(ctx, u, auth, key, p.AnthropicVersion)
-		}
 		if err != nil {
+			// A provider with a Codex-native catalog may implement inference
+			// and that catalog without implementing OpenAI model discovery.
+			if len(list) == 0 && p.MetadataURL != "" && (status == 404 || status == 405) {
+				break
+			}
 			return nil, fmt.Errorf("/v1/models: %w", err)
 		}
 		page, ok := rows(payload)
@@ -421,7 +447,7 @@ func fetchCatalog(ctx context.Context, p provider, key string) ([]model, error) 
 	if p.MetadataURL != "" {
 		meta, err := endpoint(p.MetadataURL)
 		if err != nil {
-			return nil, fmt.Errorf("metadata URL: %w", err)
+			return nil, fmt.Errorf("client model_catalog_url: %w", err)
 		}
 		metaKey := ""
 		if sameOrigin(base, meta) {
@@ -429,11 +455,14 @@ func fetchCatalog(ctx context.Context, p provider, key string) ([]model, error) 
 		}
 		payload, _, err := fetchJSON(ctx, meta, auth, metaKey, p.AnthropicVersion)
 		if err != nil {
-			return nil, fmt.Errorf("metadata endpoint: %w", err)
+			return nil, fmt.Errorf("client model_catalog_url: %w", err)
 		}
 		var ok bool
 		if supplemental, ok = rows(payload); !ok {
-			return nil, errors.New("metadata endpoint did not return a model list")
+			return nil, errors.New("client model_catalog_url did not return a model list")
+		}
+		if len(list) == 0 {
+			list, supplemental = supplemental, nil
 		}
 	}
 	result := normalize(list, supplemental)

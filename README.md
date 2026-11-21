@@ -6,7 +6,7 @@ The plugin includes executables for macOS (Apple Silicon and Intel) and Windows 
 
 ## Install
 
-In Young Router, open **External settings**, select Codex or Claude, and choose **Install** beside **Model list plugin**. The form shows installation status, synchronization, model-source configuration, and uninstall. Plugin updates are always enabled. Enabling the Young Router API offers to install the plugin.
+In Young Router, open **External settings**, select Codex or Claude, and choose **Install** beside **Model list plugin**. The card shows installation status and controls for syncing or uninstalling. Enabling the Young Router API offers to install the plugin.
 
 Alternatively install directly for each agent.
 
@@ -18,13 +18,13 @@ claude plugin install model-list-plugin --marketplace ysdj/model-list-plugin --s
 
 Start a new agent session. Codex may ask you to review and trust the plugin's hooks before it runs them. The first hook enables synchronization for that agent and discovers its provider. Young Router's install action also starts an immediate sync.
 
-## Configure
+## Model source
 
-The plugin discovers the selected Codex provider or Claude Code's `ANTHROPIC_BASE_URL` and authentication settings. To override them, use **Configure model source** in Young Router, select the `model-list-plugin` skill in Codex, or invoke `/model-list-plugin:model-list-plugin` in Claude Code. Both clients expose the same single skill. The URL can end in `/v1` or `/v1/models`. Key values remain in the agent's environment or existing settings.
+Each sync reads the selected Codex provider from `config.toml` or the Claude Code gateway from `settings.json`. Change the API in the corresponding client configuration. In Young Router, turning off **Use Young Router API** opens the client's direct connection form. The form writes the client's settings. Earlier plugin source overrides are ignored.
 
-Configuration is shared by both agents in `~/Library/Application Support/model-list-plugin/config.json` on macOS or `%APPDATA%/model-list-plugin/config.json` on Windows. Leave provider fields empty for discovery. The executable also supports `--kind auto|openai|anthropic`, `--auth-mode bearer|x-api-key|none`, and `--interval SECONDS`.
+The selected API supplies the model IDs and any metadata it publishes. When the client uses Young Router, the router's `/v1/models` returns the public context window from its own registry, including the value you set for a public model. A Codex provider with a `model_catalog_url` can supply additional metadata for its listed models. Claude Code has no corresponding field in its gateway configuration.
 
-The listing can provide context windows, reasoning levels, modalities and aliases. An optional metadata endpoint is matched by model ID and supplements the listing. A service that returns only IDs supplies no context or reasoning details. Young Router must run a version that exposes metadata in its listing. Claude uses provider model IDs by default. The optional `--claude-alias-mode metadata|derived` modes require the provider to accept those aliases.
+When a listed model has no context window, the plugin looks it up in the same public catalogs used by Young Router: Pi, the Codex catalog, and models.dev. The plugin caches this public data for six hours. Unmatched models use the client's defaults. Claude Code's auto-compaction window stays within its supported range.
 
 ## Synchronization and updates
 
