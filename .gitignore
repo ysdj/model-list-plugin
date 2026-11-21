@@ -1,0 +1,7 @@
+# Local plugin state and generated client projections
+.model-list-plugin/
+*.tmp
+.DS_Store
+
+# Test scratch files
+test/fixtures/.tmp/

@@ -1,0 +1,15 @@
+{
+  "name": "model-list-plugin",
+  "version": "0.1.0",
+  "description": "Synchronize remote OpenAI or Anthropic compatible model metadata into Codex and Claude Code.",
+  "homepage": "https://github.com/ysdj/model-list-plugin",
+  "repository": "https://github.com/ysdj/model-list-plugin",
+  "license": "MIT",
+  "author": {
+    "name": "ysdj",
+    "url": "https://github.com/ysdj"
+  },
+  "commands": "./commands",
+  "skills": "./skills",
+  "hooks": "./hooks/hooks.json"
+}

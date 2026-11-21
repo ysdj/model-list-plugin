@@ -1,0 +1,25 @@
+{
+  "description": "Refresh model-list-plugin projections when Claude Code starts or receives a prompt.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/model-list-plugin.mjs\" hook --host claude"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/model-list-plugin.mjs\" hook --host claude"
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "name": "model-list-plugin",
+  "interface": {
+    "displayName": "Model List Plugin"
+  },
+  "plugins": [
+    {
+      "name": "model-list-plugin",
+      "source": {
+        "source": "local",
+        "path": "./plugins/model-list-plugin"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_USE"
+      },
+      "category": "Developer Tools"
+    }
+  ]
+}

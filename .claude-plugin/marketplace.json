@@ -1,0 +1,22 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "model-list-plugin",
+  "description": "Remote model metadata projection for Codex and Claude Code.",
+  "owner": {
+    "name": "ysdj",
+    "url": "https://github.com/ysdj"
+  },
+  "plugins": [
+    {
+      "name": "model-list-plugin",
+      "source": "./plugins/model-list-plugin",
+      "description": "Synchronize remote OpenAI or Anthropic compatible model metadata into Codex and Claude Code.",
+      "author": {
+        "name": "ysdj",
+        "url": "https://github.com/ysdj"
+      },
+      "category": "developer-tools",
+      "homepage": "https://github.com/ysdj/model-list-plugin"
+    }
+  ]
+}
