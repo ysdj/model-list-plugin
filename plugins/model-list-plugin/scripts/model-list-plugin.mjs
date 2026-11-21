@@ -15,7 +15,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-export const VERSION = "0.1.3";
+export const VERSION = "0.1.4";
 export const PLUGIN_NAME = "model-list-plugin";
 
 const DEFAULT_CONFIG = {
@@ -28,6 +28,7 @@ const DEFAULT_CONFIG = {
     metadataUrl: "",
     anthropicVersion: "2023-06-01",
   },
+  claudeAliasMode: "auto",
   syncIntervalSeconds: 60,
   autoUpdate: true,
   updateCheckHours: 24,
@@ -100,7 +101,17 @@ function positiveNumber(value) {
 
 function nestedObjects(raw) {
   const result = [raw];
-  for (const key of ["metadata", "model_info", "modelInfo", "capabilities", "context", "limit", "limits"]) {
+  for (const key of [
+    "metadata",
+    "model_info",
+    "modelInfo",
+    "capabilities",
+    "context",
+    "model_context",
+    "modelContext",
+    "limit",
+    "limits",
+  ]) {
     if (isObject(raw?.[key])) result.push(raw[key]);
   }
   return result;
@@ -133,6 +144,11 @@ function normalizeReasoning(raw) {
       candidates.push(...asArray(reasoning.supported_efforts));
       candidates.push(...asArray(reasoning.supportedEfforts));
       candidates.push(...asArray(reasoning.efforts));
+      candidates.push(...asArray(reasoning.levels));
+      candidates.push(...asArray(reasoning.supported_levels));
+      candidates.push(...asArray(reasoning.supportedLevels));
+      candidates.push(...asArray(reasoning.effort));
+      candidates.push(...asArray(reasoning.level));
     } else {
       candidates.push(...asArray(reasoning));
     }
@@ -142,6 +158,12 @@ function normalizeReasoning(raw) {
     candidates.push(...asArray(object?.supportedReasoningLevels));
     candidates.push(...asArray(object?.reasoning_efforts));
     candidates.push(...asArray(object?.reasoningEfforts));
+    candidates.push(...asArray(object?.reasoning_effort));
+    candidates.push(...asArray(object?.reasoningEffort));
+    candidates.push(...asArray(object?.supported_reasoning_efforts));
+    candidates.push(...asArray(object?.supportedReasoningEfforts));
+    candidates.push(...asArray(object?.reasoning_levels));
+    candidates.push(...asArray(object?.reasoningLevels));
     if (object?.reasoning === true || object?.supports_reasoning === true) {
       candidates.push("low", "medium", "high");
     }
@@ -169,6 +191,8 @@ function normalizeReasoning(raw) {
       reasoning.default,
       reasoning.default_effort,
       reasoning.defaultEffort,
+      reasoning.effort,
+      reasoning.level,
     ).toLowerCase();
     if (defaultLevel) break;
   }
@@ -177,14 +201,21 @@ function normalizeReasoning(raw) {
 }
 
 function extractRows(payload) {
+  return extractRowsAtDepth(payload, 0);
+}
+
+function extractRowsAtDepth(payload, depth) {
   if (Array.isArray(payload)) return payload.filter(isObject);
-  if (!isObject(payload)) return [];
-  for (const key of ["data", "models", "items", "results", "model_catalog", "modelCatalog"]) {
-    if (Array.isArray(payload[key])) return payload[key].filter(isObject);
-    if (isObject(payload[key])) {
-      return Object.entries(payload[key]).map(([id, value]) => ({
-        ...(isObject(value) ? value : {}),
-        id: rowId(value) || id,
+  if (!isObject(payload) || depth > 4) return [];
+  for (const key of ["data", "models", "items", "results", "model_catalog", "modelCatalog", "catalog"]) {
+    const value = payload[key];
+    if (Array.isArray(value)) return value.filter(isObject);
+    if (isObject(value)) {
+      const nested = extractRowsAtDepth(value, depth + 1);
+      if (nested.length) return nested;
+      return Object.entries(value).map(([id, entry]) => ({
+        ...(isObject(entry) ? entry : {}),
+        id: rowId(entry) || id,
       }));
     }
   }
@@ -194,7 +225,7 @@ function extractRows(payload) {
       id: rowId(value) || id,
     }));
   }
-  return [];
+  return rowId(payload) ? [payload] : [];
 }
 
 function rowId(raw) {
@@ -206,7 +237,12 @@ function generationMode(raw) {
   for (const object of nestedObjects(raw)) {
     values.push(...asArray(object?.mode));
     values.push(...asArray(object?.modes));
-    values.push(...asArray(object?.modalities));
+    values.push(...asArray(object?.task));
+    values.push(...asArray(object?.type));
+    values.push(...asArray(object?.model_type));
+    values.push(...asArray(object?.modelType));
+    values.push(...asArray(object?.generation_type));
+    values.push(...asArray(object?.generationType));
     values.push(...asArray(object?.output_modalities));
     values.push(...asArray(object?.outputModalities));
     if (object?.image_generation === true || object?.imageGeneration === true) values.push("image");
@@ -316,6 +352,9 @@ export function normalizeModelsResponse(payload, metadataPayload = null) {
 }
 
 export function pathsFor(env = process.env) {
+  const claudeConfigRoot = path.resolve(
+    nonEmptyString(env.CLAUDE_CONFIG_DIR, path.join(os.homedir(), ".claude")),
+  );
   const dataRoot = path.resolve(
     nonEmptyString(
       env.MODEL_LIST_PLUGIN_DATA,
@@ -339,11 +378,7 @@ export function pathsFor(env = process.env) {
     claudeSettings: path.resolve(
       nonEmptyString(
         env.MODEL_LIST_PLUGIN_CLAUDE_SETTINGS,
-        path.join(
-          process.platform === "win32" ? env.APPDATA || os.homedir() : os.homedir(),
-          ".claude",
-          "settings.json",
-        ),
+        path.join(claudeConfigRoot, "settings.json"),
       ),
     ),
   };
@@ -429,6 +464,7 @@ export function loadConfig(filePath = pathsFor().config) {
   config.syncIntervalSeconds = Math.max(0, positiveNumber(config.syncIntervalSeconds) || DEFAULT_CONFIG.syncIntervalSeconds);
   config.updateCheckHours = Math.max(1, positiveNumber(config.updateCheckHours) || DEFAULT_CONFIG.updateCheckHours);
   config.autoUpdate = config.autoUpdate !== false;
+  if (!["auto", "raw", "derived"].includes(config.claudeAliasMode)) config.claudeAliasMode = "auto";
   return config;
 }
 
@@ -554,11 +590,25 @@ async function fetchJson(endpoint, provider, timeoutMs = 10_000) {
   }
 }
 
+function sameOrigin(left, right) {
+  try {
+    return new URL(left).origin === new URL(right).origin;
+  } catch {
+    return false;
+  }
+}
+
 export async function fetchModels(config) {
   const provider = resolveProvider(config);
   if (!provider.modelsUrl && !provider.metadataUrl) throw new Error("configure provider.baseUrl before enabling the plugin");
   const listPayload = provider.modelsUrl ? await fetchJson(provider.modelsUrl, provider) : null;
-  const metadataPayload = provider.metadataUrl ? await fetchJson(provider.metadataUrl, provider) : null;
+  const metadataProvider =
+    !provider.modelsUrl || sameOrigin(provider.modelsUrl, provider.metadataUrl)
+      ? provider
+      : { ...provider, token: "" };
+  const metadataPayload = provider.metadataUrl
+    ? await fetchJson(provider.metadataUrl, metadataProvider)
+    : null;
   const models = normalizeModelsResponse(listPayload, metadataPayload);
   if (!models.length) throw new Error("provider returned no usable models");
   return { models, provider };
@@ -712,8 +762,9 @@ export function removeModelCatalogPointer(contents, managedPath, originalPointer
   return source.replace(/^[ \t]*model_catalog_json[ \t]*=[^\r\n]*(?:\r?\n|$)/m, "");
 }
 
-function aliasFor(model, used) {
-  const explicit = model.claudeAlias.replace(/\[1m\]$/, "").trim();
+function aliasFor(model, used, mode = "auto") {
+  if (mode === "raw") return model.id;
+  const explicit = mode === "derived" ? "" : model.claudeAlias.replace(/\[1m\]$/, "").trim();
   let base = explicit || `claude-mythos-${crypto.createHash("sha256").update(model.id).digest("hex").slice(0, 6)}`;
   if (!/^claude-[a-z0-9-]+$/i.test(base)) base = `claude-mythos-${crypto.createHash("sha256").update(model.id).digest("hex").slice(0, 6)}`;
   let candidate = base + (model.oneMillion ? "[1m]" : "");
@@ -737,13 +788,14 @@ function behavesAsFor(model) {
     : "claude-sonnet-4-6";
 }
 
-export function buildClaudeProjection(models) {
+export function buildClaudeProjection(models, options = {}) {
+  const aliasMode = ["auto", "raw", "derived"].includes(options.aliasMode) ? options.aliasMode : "auto";
   const used = new Set();
-  const options = [];
+  const pickerOptions = [];
   const modelSettings = {};
   const aliases = [];
   for (const model of models.filter((candidate) => !candidate.generation)) {
-    const alias = aliasFor(model, used);
+    const alias = aliasFor(model, used, aliasMode);
     aliases.push(alias);
     const option = {
       model: alias,
@@ -751,12 +803,12 @@ export function buildClaudeProjection(models) {
       description: model.description || `Remote model ${model.id}`,
       behavesAs: behavesAsFor(model),
     };
-    options.push(option);
+    pickerOptions.push(option);
     const context = model.oneMillion ? Math.max(model.contextWindow, 1_000_000) : model.contextWindow;
     if (context) modelSettings[alias] = { autoCompactWindow: context };
   }
   return {
-    modelPicker: { replaceBuiltInOptions: true, options },
+    modelPicker: { replaceBuiltInOptions: true, options: pickerOptions },
     modelSettings,
     aliases,
   };
@@ -826,9 +878,9 @@ function disableCodexProjection(locations, state) {
   removeFile(managed.managedPath || locations.codexCatalog);
 }
 
-function applyClaudeProjection(models, locations, state) {
+function applyClaudeProjection(models, locations, state, config) {
   const current = readJson(locations.claudeSettings, {});
-  const projection = buildClaudeProjection(models);
+  const projection = buildClaudeProjection(models, { aliasMode: config.claudeAliasMode });
   if (!projection.modelPicker.options.length) throw new Error("provider returned no conversation-capable models");
   const next = settingsProjection(current, projection, state);
   state.managed = { ...(state.managed || {}), claudeAliases: projection.aliases };
@@ -897,7 +949,7 @@ export async function syncOnce(config, locations = pathsFor(), state = loadState
     ]);
     try {
       if (targetEnabled(config, "codex")) applyCodexProjection(models, locations, state);
-      if (targetEnabled(config, "claude")) applyClaudeProjection(models, locations, state);
+      if (targetEnabled(config, "claude")) applyClaudeProjection(models, locations, state, config);
     } catch (error) {
       // A failed projection must not replace a previously usable catalog.  The
       // endpoint was already validated and the per-file writes are atomic, so
@@ -987,7 +1039,8 @@ function usage() {
     "Usage: node scripts/model-list-plugin.mjs <command> [options]\n\n" +
     "Commands: install, configure, enable, disable, sync, status, update, uninstall, hook\n" +
     "Options: --base-url URL --kind auto|openai|anthropic --auth-env NAME --metadata-url URL\n" +
-    "         --targets codex,claude --interval SECONDS --auto-update true|false --json\n";
+    "         --targets codex,claude --interval SECONDS --claude-alias-mode auto|raw|derived\n" +
+    "         --auto-update true|false --json\n";
 }
 
 function print(value, asJson = false) {
@@ -1031,6 +1084,13 @@ function configureFromArgs(config, args) {
   if (args.interval !== undefined) next.syncIntervalSeconds = Math.max(0, positiveNumber(args.interval));
   if (args["auto-update"] !== undefined) next.autoUpdate = parseBoolean(args["auto-update"]);
   if (args["update-hours"] !== undefined) next.updateCheckHours = Math.max(1, positiveNumber(args["update-hours"]));
+  if (args["claude-alias-mode"] !== undefined) {
+    const mode = String(args["claude-alias-mode"]).toLowerCase();
+    if (!["auto", "raw", "derived"].includes(mode)) {
+      throw new Error("claude-alias-mode must be auto, raw, or derived");
+    }
+    next.claudeAliasMode = mode;
+  }
   if (args.targets !== undefined) {
     const targets = String(args.targets).split(",").map((item) => item.trim().toLowerCase()).filter(Boolean);
     next.targets = { codex: targets.includes("codex"), claude: targets.includes("claude") };
@@ -1130,7 +1190,19 @@ async function main(argv = process.argv.slice(2)) {
   throw new Error(`unknown command: ${command}`);
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url))) {
+function isMainModule() {
+  if (!process.argv[1]) return false;
+  const entrypoint = path.resolve(process.argv[1]);
+  const modulePath = path.resolve(fileURLToPath(import.meta.url));
+  if (entrypoint === modulePath) return true;
+  try {
+    return fs.realpathSync(entrypoint) === fs.realpathSync(modulePath);
+  } catch {
+    return false;
+  }
+}
+
+if (isMainModule()) {
   main().catch((error) => {
     process.stderr.write(`model-list-plugin: ${error instanceof Error ? error.message : String(error)}\n`);
     process.exitCode = 1;

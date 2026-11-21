@@ -1,6 +1,6 @@
 ---
 description: Configure the remote OpenAI or Anthropic compatible model endpoint.
-argument-hint: "--base-url URL [--kind auto|openai|anthropic] [--auth-env ENV] [--metadata-url URL]"
+argument-hint: "--base-url URL [--kind auto|openai|anthropic] [--auth-env ENV] [--metadata-url URL] [--claude-alias-mode auto|raw|derived]"
 ---
 
 Use the arguments supplied by the user to run:

@@ -3,6 +3,8 @@ import { createServer } from "node:http";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 import {
@@ -10,15 +12,19 @@ import {
   buildCodexCatalog,
   defaultConfig,
   disable,
+  fetchModels,
   mergeModelRows,
   modelsUrl,
   normalizeBaseUrl,
   normalizeModelsResponse,
+  pathsFor,
   readModelCatalogPointer,
   removeModelCatalogPointer,
   syncOnce,
   writeModelCatalogPointer,
 } from "../plugins/model-list-plugin/scripts/model-list-plugin.mjs";
+
+const SCRIPT_PATH = fileURLToPath(new URL("../plugins/model-list-plugin/scripts/model-list-plugin.mjs", import.meta.url));
 
 test("normalizes provider base URLs to /v1/models", () => {
   assert.equal(normalizeBaseUrl("https://example.test/v1/models"), "https://example.test/v1");
@@ -26,6 +32,37 @@ test("normalizes provider base URLs to /v1/models", () => {
   assert.equal(modelsUrl("https://example.test"), "https://example.test/v1/models");
   assert.equal(modelsUrl("https://example.test/v1"), "https://example.test/v1/models");
   assert.throws(() => normalizeBaseUrl("example.test/v1"), /absolute http/);
+});
+
+test("honors Claude's custom config root for its user settings", () => {
+  const locations = pathsFor({
+    MODEL_LIST_PLUGIN_DATA: "/tmp/model-list-data",
+    CLAUDE_CONFIG_DIR: "/tmp/custom-claude",
+    CODEX_HOME: "/tmp/custom-codex",
+  });
+  assert.equal(locations.claudeSettings, path.resolve("/tmp/custom-claude/settings.json"));
+  assert.equal(locations.codexConfig, path.resolve("/tmp/custom-codex/config.toml"));
+});
+
+test("runs its CLI entry point when invoked through a filesystem alias", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "model-list-plugin-cli-"));
+  const aliasPath = path.join(root, "alias.mjs");
+  try {
+    fs.symlinkSync(SCRIPT_PATH, aliasPath);
+  } catch (error) {
+    if (error.code === "EPERM" || error.code === "EACCES") return;
+    throw error;
+  }
+  const result = spawnSync(process.execPath, [aliasPath, "status", "--json"], {
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      MODEL_LIST_PLUGIN_DATA: path.join(root, "data"),
+      MODEL_LIST_PLUGIN_CONFIG: path.join(root, "data", "config.json"),
+    },
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(JSON.parse(result.stdout).enabled, false);
 });
 
 test("normalizes OpenAI and Anthropic rows and overlays metadata", () => {
@@ -76,6 +113,66 @@ test("accepts a metadata map keyed by public model id", () => {
   assert.deepEqual(models[0].reasoning.supported, ["medium", "max"]);
 });
 
+test("unwraps nested catalog payloads without treating image input as generation", () => {
+  const models = normalizeModelsResponse({
+    modelCatalog: {
+      models: [
+        { id: "vision-chat", modalities: ["text", "image"] },
+        { id: "image-maker", mode: "image_generation" },
+      ],
+    },
+  });
+  assert.deepEqual(models.map((model) => [model.id, model.generation]), [
+    ["vision-chat", false],
+    ["image-maker", true],
+  ]);
+  assert.deepEqual(buildCodexCatalog(models).models.map((model) => model.slug), ["vision-chat"]);
+});
+
+test("does not forward provider credentials to a cross-origin metadata URL", async (t) => {
+  let modelAuthorization = "";
+  let metadataAuthorization = "";
+  const modelServer = createServer((request, response) => {
+    modelAuthorization = request.headers.authorization || "";
+    response.setHeader("content-type", "application/json");
+    response.end(JSON.stringify({ data: [{ id: "remote-model" }] }));
+  });
+  const metadataServer = createServer((request, response) => {
+    metadataAuthorization = request.headers.authorization || "";
+    response.setHeader("content-type", "application/json");
+    response.end(JSON.stringify({ data: [{ id: "remote-model", context_window: 128000 }] }));
+  });
+  await Promise.all([
+    new Promise((resolve) => modelServer.listen(0, "127.0.0.1", resolve)),
+    new Promise((resolve) => metadataServer.listen(0, "127.0.0.1", resolve)),
+  ]);
+  t.after(() => {
+    modelServer.close();
+    metadataServer.close();
+  });
+
+  const previousKey = process.env.OPENAI_API_KEY;
+  process.env.OPENAI_API_KEY = "test-secret";
+  try {
+    const models = await fetchModels({
+      ...defaultConfig(),
+      provider: {
+        ...defaultConfig().provider,
+        kind: "openai",
+        authEnv: "OPENAI_API_KEY",
+        baseUrl: `http://127.0.0.1:${modelServer.address().port}/v1`,
+        metadataUrl: `http://127.0.0.1:${metadataServer.address().port}/modelcatalog/list`,
+      },
+    });
+    assert.equal(models.models[0].contextWindow, 128000);
+  } finally {
+    if (previousKey === undefined) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = previousKey;
+  }
+  assert.equal(modelAuthorization, "Bearer test-secret");
+  assert.equal(metadataAuthorization, "");
+});
+
 test("builds a native-shaped Codex catalog and a Claude picker projection", () => {
   const models = mergeModelRows(
     [{ id: "relay-model" }],
@@ -101,6 +198,17 @@ test("builds a native-shaped Codex catalog and a Claude picker projection", () =
   assert.equal(projection.modelPicker.options[0].label, "Relay Model");
   assert.match(projection.modelPicker.options[0].model, /^claude-mythos-[0-9a-f]+\[1m\]$/);
   assert.equal(projection.modelSettings[projection.aliases[0]].autoCompactWindow, 1048576);
+  assert.equal(buildClaudeProjection(models, { aliasMode: "raw" }).aliases[0], "relay-model");
+  assert.equal(
+    buildClaudeProjection(models, { aliasMode: "derived" }).aliases[0],
+    projection.aliases[0],
+  );
+
+  const explicitAlias = normalizeModelsResponse({
+    data: [{ id: "relay-model", claude_alias: "claude-custom-model" }],
+  });
+  assert.equal(buildClaudeProjection(explicitAlias).aliases[0], "claude-custom-model");
+  assert.match(buildClaudeProjection(explicitAlias, { aliasMode: "derived" }).aliases[0], /^claude-mythos-/);
 });
 
 test("keeps media generators out of conversation pickers", () => {

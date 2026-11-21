@@ -36,7 +36,8 @@ node "$CLAUDE_PLUGIN_ROOT/scripts/model-list-plugin.mjs" configure \
   --base-url https://gateway.example.com/v1 \
   --kind auto \
   --auth-env OPENAI_API_KEY \
-  --targets codex,claude
+  --targets codex,claude \
+  --claude-alias-mode auto
 ```
 
 For Anthropic compatible endpoints use `--kind anthropic` and an environment variable such as `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN`. The key is read for the request and is never written to the plugin configuration, catalog, settings, logs, or Git repository.
@@ -49,6 +50,8 @@ node "$CLAUDE_PLUGIN_ROOT/scripts/model-list-plugin.mjs" configure \
 ```
 
 Metadata rows may use `context_window`, `max_context_window`, `effective_context_window_percent`, `supported_efforts`, `default_reasoning_level`, `claude_alias`, `behaves_as`, `mode`, `modalities`, and the equivalent camel-case forms. The plugin also accepts the standard OpenAI `data` array and Anthropic `data` array. Unknown fields are ignored when projecting into either host.
+
+Claude aliases default to `auto`, which uses a valid alias from metadata and otherwise creates a stable `claude-mythos-<hash>` alias. Set `--claude-alias-mode raw` to use the provider's model IDs directly, or `derived` to always generate plugin aliases.
 
 The configuration is stored in the platform user data directory.
 
@@ -72,11 +75,11 @@ node "$CLAUDE_PLUGIN_ROOT/scripts/model-list-plugin.mjs" disable
 
 Codex receives a catalog at `~/.codex/model-list-plugin-catalog.json` and a `model_catalog_json` pointer in `~/.codex/config.toml`. Native Codex model profiles are read from the installed Codex CLI when available, then remote context and reasoning metadata is overlaid. A generic endpoint therefore works without copying a Linux young-router catalog to the client.
 
-Claude Code receives `modelPicker.options` and per-alias `modelSettings`. Aliases are deterministic `claude-mythos-<hash>` names unless a valid alias is supplied by the metadata endpoint. A model with a one-million-token context uses the `[1m]` suffix and a matching `autoCompactWindow` entry. User environment variables, labels, and credentials remain in the host settings.
+Claude Code receives `modelPicker.options` and per-alias `modelSettings`. A model with a one-million-token context uses the `[1m]` suffix and a matching `autoCompactWindow` entry. `modelPicker` support requires Claude Code 2.1.242 or later. User environment variables, labels, and credentials remain in the host settings.
 
 ## Synchronization and updates
 
-The plugin has no resident process. Codex uses `SessionStart`. Claude Code uses `SessionStart` and `UserPromptSubmit`. The default refresh interval is 60 seconds, which gives near-real-time updates while an agent is open and avoids network work on every prompt. Closing the host stops hook execution, so a new session is the next refresh boundary.
+The plugin has no resident process. Codex and Claude Code use `SessionStart` plus `UserPromptSubmit`. The default refresh interval is 60 seconds, which gives near-real-time updates while an agent is open and avoids network work on every prompt. Closing the host stops hook execution, so a new session is the next refresh boundary.
 
 Host plugin managers own plugin upgrades. The hook checks once per day by default and runs the corresponding marketplace refresh command. A manual update is available as:
 
