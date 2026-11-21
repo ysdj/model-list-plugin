@@ -15,7 +15,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-export const VERSION = "0.1.4";
+export const VERSION = "0.1.5";
 export const PLUGIN_NAME = "model-list-plugin";
 
 const DEFAULT_CONFIG = {
@@ -97,6 +97,15 @@ function positiveNumber(value) {
     if (Number.isFinite(parsed) && parsed > 0) return Math.round(parsed);
   }
   return 0;
+}
+
+function nonNegativeNumber(value) {
+  if (typeof value === "number" && Number.isFinite(value) && value >= 0) return Math.round(value);
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Number(value.replaceAll(",", "").trim());
+    if (Number.isFinite(parsed) && parsed >= 0) return Math.round(parsed);
+  }
+  return -1;
 }
 
 function nestedObjects(raw) {
@@ -461,7 +470,8 @@ export function loadConfig(filePath = pathsFor().config) {
     provider: { ...DEFAULT_CONFIG.provider, ...(isObject(value?.provider) ? value.provider : {}) },
   };
   config.enabled = config.enabled === true;
-  config.syncIntervalSeconds = Math.max(0, positiveNumber(config.syncIntervalSeconds) || DEFAULT_CONFIG.syncIntervalSeconds);
+  const syncIntervalSeconds = nonNegativeNumber(config.syncIntervalSeconds);
+  config.syncIntervalSeconds = syncIntervalSeconds >= 0 ? syncIntervalSeconds : DEFAULT_CONFIG.syncIntervalSeconds;
   config.updateCheckHours = Math.max(1, positiveNumber(config.updateCheckHours) || DEFAULT_CONFIG.updateCheckHours);
   config.autoUpdate = config.autoUpdate !== false;
   if (!["auto", "raw", "derived"].includes(config.claudeAliasMode)) config.claudeAliasMode = "auto";

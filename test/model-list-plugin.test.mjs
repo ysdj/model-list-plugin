@@ -13,6 +13,7 @@ import {
   defaultConfig,
   disable,
   fetchModels,
+  loadConfig,
   mergeModelRows,
   modelsUrl,
   normalizeBaseUrl,
@@ -42,6 +43,15 @@ test("honors Claude's custom config root for its user settings", () => {
   });
   assert.equal(locations.claudeSettings, path.resolve("/tmp/custom-claude/settings.json"));
   assert.equal(locations.codexConfig, path.resolve("/tmp/custom-codex/config.toml"));
+});
+
+test("preserves an explicit zero sync interval", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "model-list-plugin-config-"));
+  const configPath = path.join(root, "config.json");
+  fs.writeFileSync(configPath, JSON.stringify({ syncIntervalSeconds: 0, claudeAliasMode: "invalid" }));
+  const config = loadConfig(configPath);
+  assert.equal(config.syncIntervalSeconds, 0);
+  assert.equal(config.claudeAliasMode, "auto");
 });
 
 test("runs its CLI entry point when invoked through a filesystem alias", () => {
