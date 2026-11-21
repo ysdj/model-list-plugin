@@ -13,7 +13,7 @@ import (
 	"github.com/pelletier/go-toml/v2"
 )
 
-const version = "0.2.0"
+const version = "0.2.1"
 const pluginName = "model-list-plugin"
 
 type targets struct {
@@ -28,12 +28,10 @@ type config struct {
 	Provider            provider        `json:"provider"`
 	ClaudeAliasMode     string          `json:"claudeAliasMode"`
 	SyncIntervalSeconds int             `json:"syncIntervalSeconds"`
-	AutoUpdate          bool            `json:"autoUpdate"`
-	UpdateCheckHours    int             `json:"updateCheckHours"`
 }
 
 func defaultConfig() config {
-	return config{Targets: targets{true, true}, InitializedTargets: map[string]bool{}, Provider: provider{Kind: "auto", AnthropicVersion: "2023-06-01"}, ClaudeAliasMode: "raw", SyncIntervalSeconds: 60, AutoUpdate: true, UpdateCheckHours: 24}
+	return config{Targets: targets{true, true}, InitializedTargets: map[string]bool{}, Provider: provider{Kind: "auto", AnthropicVersion: "2023-06-01"}, ClaudeAliasMode: "raw", SyncIntervalSeconds: 60}
 }
 
 type codexState struct {
@@ -130,9 +128,6 @@ func loadConfig(path string) (config, error) {
 	}
 	if value.SyncIntervalSeconds < 0 {
 		return value, errors.New("syncIntervalSeconds must be non-negative")
-	}
-	if value.UpdateCheckHours < 1 {
-		value.UpdateCheckHours = 24
 	}
 	if value.ClaudeAliasMode == "" {
 		value.ClaudeAliasMode = "raw"

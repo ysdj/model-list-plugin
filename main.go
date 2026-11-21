@@ -161,10 +161,10 @@ func status(cfg config, loc locations, saved state) object {
 		return u.String()
 	}
 	return object{"version": version, "enabled": cfg.Enabled, "targets": cfg.Targets,
-		"autoUpdate": cfg.AutoUpdate, "syncIntervalSeconds": cfg.SyncIntervalSeconds,
-		"configuredProvider": cfg.Provider,
-		"provider":           object{"baseUrl": safeURL(p.BaseURL), "metadataUrl": safeURL(p.MetadataURL), "kind": p.Kind, "authEnv": p.AuthEnv, "authConfigured": key != ""},
-		"lastSyncAt":         saved.LastSyncAt, "lastSyncAtByTarget": saved.LastSyncAtByTarget, "lastError": saved.LastError, "modelCount": len(saved.ModelIDs), "modelIds": saved.ModelIDs,
+		"syncIntervalSeconds": cfg.SyncIntervalSeconds,
+		"configuredProvider":  cfg.Provider,
+		"provider":            object{"baseUrl": safeURL(p.BaseURL), "metadataUrl": safeURL(p.MetadataURL), "kind": p.Kind, "authEnv": p.AuthEnv, "authConfigured": key != ""},
+		"lastSyncAt":          saved.LastSyncAt, "lastSyncAtByTarget": saved.LastSyncAtByTarget, "lastError": saved.LastError, "modelCount": len(saved.ModelIDs), "modelIds": saved.ModelIDs,
 		"lastUpdateCheckAtByHost": saved.LastUpdateCheckAtByHost, "lastUpdateErrorByHost": saved.LastUpdateErrorByHost,
 		"paths": object{"config": loc.Config, "dataRoot": loc.Data, "codexCatalog": loc.CodexCatalog, "codexConfig": loc.CodexConfig, "claudeSettings": loc.ClaudeSettings}}
 }
@@ -234,20 +234,6 @@ func setConfig(cfg config, args map[string]string) (config, error) {
 			return cfg, errors.New("interval must be a non-negative integer")
 		}
 		cfg.SyncIntervalSeconds = n
-	}
-	if value, ok := args["update-hours"]; ok {
-		n, err := strconv.Atoi(value)
-		if err != nil || n < 1 {
-			return cfg, errors.New("update-hours must be a positive integer")
-		}
-		cfg.UpdateCheckHours = n
-	}
-	if value, ok := args["auto-update"]; ok {
-		v, err := strconv.ParseBool(value)
-		if err != nil {
-			return cfg, errors.New("auto-update must be true or false")
-		}
-		cfg.AutoUpdate = v
 	}
 	if value, ok := args["claude-alias-mode"]; ok {
 		if value != "raw" && value != "auto" && value != "metadata" && value != "derived" {
@@ -389,7 +375,7 @@ func run(args []string) error {
 		return err
 	}
 	if command == "help" || options["help"] == "true" {
-		fmt.Printf("model-list-plugin %s\nCommands: install configure enable disable sync status update uninstall hook\nOptions: --base-url URL --metadata-url URL --kind auto|openai|anthropic --auth-env NAME --auth-mode bearer|x-api-key|none --targets codex,claude --interval SECONDS --auto-update true|false\n", version)
+		fmt.Printf("model-list-plugin %s\nCommands: install configure enable disable sync status update uninstall hook\nOptions: --base-url URL --metadata-url URL --kind auto|openai|anthropic --auth-env NAME --auth-mode bearer|x-api-key|none --targets codex,claude --interval SECONDS\n", version)
 		return nil
 	}
 	loc, err := locationsFor()
@@ -617,7 +603,7 @@ func run(args []string) error {
 		if cfg.Enabled && enabledTarget && (options["force"] == "true" || due(saved.LastSyncAtByTarget[host], time.Duration(cfg.SyncIntervalSeconds)*time.Second)) {
 			_, _ = syncModels(cfg, loc, &saved, host)
 		}
-		if cfg.AutoUpdate && due(saved.LastUpdateCheckAtByHost[host], time.Duration(cfg.UpdateCheckHours)*time.Hour) {
+		if due(saved.LastUpdateCheckAtByHost[host], 24*time.Hour) {
 			if saved.LastUpdateCheckAtByHost == nil {
 				saved.LastUpdateCheckAtByHost = map[string]string{}
 			}

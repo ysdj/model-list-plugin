@@ -78,6 +78,10 @@ func TestLegacyDisabledConfigurationStaysDisabled(t *testing.T) {
 	if err := writeFile(loc.Config, []byte(`{"enabled":false,"targets":{"codex":true,"claude":true},"autoUpdate":false}`)); err != nil {
 		t.Fatal(err)
 	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if err := writeJSON(loc.State, state{LastUpdateCheckAtByHost: map[string]string{"codex": now, "claude": now}}); err != nil {
+		t.Fatal(err)
+	}
 	for _, host := range []string{"codex", "claude"} {
 		if err := run([]string{"hook", "--host", host}); err != nil {
 			t.Fatal(err)
@@ -100,14 +104,17 @@ func TestFreshConfiguredHostStartsOnFirstHook(t *testing.T) {
 		_, _ = w.Write([]byte(`{"data":[{"id":"example"}]}`))
 	}))
 	defer server.Close()
-	if err := run([]string{"configure", "--base-url", server.URL, "--auto-update", "false"}); err != nil {
-		t.Fatal(err)
-	}
-	if err := run([]string{"hook", "--host", "codex"}); err != nil {
+	if err := run([]string{"configure", "--base-url", server.URL}); err != nil {
 		t.Fatal(err)
 	}
 	loc, err := locationsFor()
 	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeJSON(loc.State, state{LastUpdateCheckAtByHost: map[string]string{"codex": time.Now().UTC().Format(time.RFC3339Nano)}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := run([]string{"hook", "--host", "codex"}); err != nil {
 		t.Fatal(err)
 	}
 	cfg, err := loadConfig(loc.Config)
@@ -218,7 +225,6 @@ func TestSyncAndRestorePreservesOtherChanges(t *testing.T) {
 	}
 	cfg := defaultConfig()
 	cfg.Enabled = true
-	cfg.AutoUpdate = false
 	cfg.Provider.BaseURL = server.URL
 	saved := state{}
 	count, err := syncModels(cfg, loc, &saved, "")
@@ -321,7 +327,7 @@ func TestHostEnableDisableAndFailure(t *testing.T) {
 		_, _ = w.Write([]byte("{\"data\":[{\"id\":\"example\",\"context_window\":128000}]}"))
 	}))
 	defer server.Close()
-	if err := run([]string{"configure", "--base-url", server.URL, "--auto-update", "false"}); err != nil {
+	if err := run([]string{"configure", "--base-url", server.URL}); err != nil {
 		t.Fatal(err)
 	}
 	if err := run([]string{"enable", "--host", "codex"}); err != nil {

@@ -1,12 +1,12 @@
 ---
 name: model-list-plugin
-description: Configure and operate model-list-plugin for remote model metadata in Codex and Claude Code.
+description: Inspect, configure, or refresh the remote models and metadata synchronized by model-list-plugin in Codex or Claude Code.
 ---
 
-# model-list-plugin
+The executable is at `bin/model-list-plugin` (`bin/model-list-plugin.exe` on Windows) under the plugin root, two directories above this skill's directory. Run it with the requested operation and separate, quoted arguments.
 
-The plugin reads a configured OpenAI or Anthropic compatible `GET /v1/models` endpoint. An optional metadata URL can add context, reasoning, modality, Claude alias, and `behavesAs` fields. It writes a Codex catalog and Claude Code picker settings locally. It never needs a local young-router process.
+- `status` (default): report the model count, synchronization status, and any error. Do not include credentials.
+- `configure --base-url URL --metadata-url URL --auth-env NAME`: change the shared model source. Each option is optional. An empty string clears that override and restores discovery from the client. Use an environment variable **name** for the API key.
+- `enable --host HOST`, `disable --host HOST`, `sync --host HOST`: use `codex` or `claude` for the current client. Disabling restores its prior model settings.
 
-Use the included commands for status, configuration, enable, disable, sync, and update. Credentials stay in the environment variable named by `provider.authEnv`.
-
-The hook runs at session start and at prompt submission with a time limit. It does not run after the host process closes, so the next session is the refresh boundary.
+Plugin updates run automatically while the host's hooks are active. Use the host's plugin manager to remove the plugin.
