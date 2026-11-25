@@ -24,6 +24,8 @@ Each sync reads the selected Codex provider from `config.toml` or the Claude Cod
 
 The selected API supplies the model IDs and any metadata it publishes. When the client uses Young Router, the router's `/v1/models` returns the public context window from its own registry, including the value you set for a public model. A Codex provider with a `model_catalog_url` can supply additional metadata for its listed models. Claude Code has no corresponding field in its gateway configuration.
 
+The key is taken from the same place the client reads it. A copy can lag behind: a gateway key replaced in the app, an `OPENAI_API_KEY` left in the environment from another install, or a `settings.json` edited by hand. When the API rejects the configured key, the sync retries with the credential the running session carries (Claude's `ANTHROPIC_AUTH_TOKEN`/`ANTHROPIC_API_KEY`, Codex's `OPENAI_API_KEY` or `auth.json`) and keeps whichever the endpoint accepts for the rest of that sync. A Claude session's key is only offered to the endpoint its own `ANTHROPIC_BASE_URL` names.
+
 When a listed model has no context window, the plugin looks it up in the same public catalogs used by Young Router: Pi, the Codex catalog, and models.dev. The plugin caches this public data for six hours. Unmatched models use the client's defaults. Claude Code's auto-compaction window stays within its supported range.
 
 ## Synchronization and updates

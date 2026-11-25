@@ -502,3 +502,99 @@ func TestMigrateHostData(t *testing.T) {
 		t.Fatalf("state: %+v %v", saved, err)
 	}
 }
+
+func TestClaudeListingFallsBackToTheSessionKey(t *testing.T) {
+	// A settings file can name a gateway key that the app has since replaced.
+	// The session that runs this hook carries the live one; the listing must
+	// present it instead of repeating the stale copy's 401.
+	loc := testLocations(t)
+	var seen []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		key := first(r.Header.Get("x-api-key"), strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
+		seen = append(seen, key)
+		if key != "live-gateway-key" {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":"invalid key"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"data":[{"id":"model-a","max_input_tokens":500000}]}`))
+	}))
+	defer server.Close()
+	t.Setenv("ANTHROPIC_BASE_URL", server.URL)
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "live-gateway-key")
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	if err := writeJSON(loc.ClaudeSettings, map[string]any{"env": map[string]string{
+		"ANTHROPIC_BASE_URL":   server.URL,
+		"ANTHROPIC_AUTH_TOKEN": "stale-gateway-key",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	p, key, err := resolveProvider(loc, "claude")
+	if err != nil || key != "stale-gateway-key" {
+		t.Fatalf("configured key should stay first: %q %v", key, err)
+	}
+	if len(p.Credentials) != 2 || p.Credentials[1] != (credential{"live-gateway-key", "anthropic-token"}) {
+		t.Fatalf("session credential was not offered: %+v", p.Credentials)
+	}
+	models, err := fetchCatalog(context.Background(), p, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(models) != 1 || models[0].ID != "model-a" || models[0].Window != 500000 {
+		t.Fatalf("wrong catalog: %+v", models)
+	}
+	if !reflect.DeepEqual(seen, []string{"stale-gateway-key", "live-gateway-key"}) {
+		t.Fatalf("credentials tried: %v", seen)
+	}
+}
+
+func TestClaudeSessionKeyNeverTravelsToAnotherGateway(t *testing.T) {
+	loc := testLocations(t)
+	t.Setenv("ANTHROPIC_BASE_URL", "https://other.example.test")
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "other-gateway-key")
+	if err := writeJSON(loc.ClaudeSettings, map[string]any{"env": map[string]string{
+		"ANTHROPIC_BASE_URL": "https://this.example.test",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	p, key, err := resolveProvider(loc, "claude")
+	if err != nil || key != "" || len(p.Credentials) != 0 {
+		t.Fatalf("another gateway's key was adopted: %+v %q %v", p.Credentials, key, err)
+	}
+}
+
+func TestCodexListingFallsBackToAuthJSON(t *testing.T) {
+	loc := testLocations(t)
+	var seen []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		key := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		seen = append(seen, key)
+		if key != "auth-json-key" {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":"invalid key"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"data":[{"id":"model-a","context_window":500000}]}`))
+	}))
+	defer server.Close()
+	t.Setenv("OPENAI_API_KEY", "stale-env-key")
+	if err := writeFile(loc.CodexConfig, []byte("model_provider = 'custom'\n[model_providers.custom]\nbase_url = '"+server.URL+"/v1'\nrequires_openai_auth = true\n")); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeJSON(filepath.Join(filepath.Dir(loc.CodexConfig), "auth.json"), map[string]any{"OPENAI_API_KEY": "auth-json-key"}); err != nil {
+		t.Fatal(err)
+	}
+	p, key, err := resolveProvider(loc, "codex")
+	if err != nil || key != "stale-env-key" {
+		t.Fatalf("environment key should stay first: %q %v", key, err)
+	}
+	if len(p.Credentials) != 2 || p.Credentials[1].Value != "auth-json-key" {
+		t.Fatalf("auth.json was not offered: %+v", p.Credentials)
+	}
+	if _, err := fetchCatalog(context.Background(), p, key); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(seen, []string{"stale-env-key", "auth-json-key"}) {
+		t.Fatalf("credentials tried: %v", seen)
+	}
+}

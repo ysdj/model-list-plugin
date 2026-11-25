@@ -7,13 +7,14 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/pelletier/go-toml/v2"
 )
 
-const version = "0.2.2"
+const version = "0.2.3"
 const pluginName = "model-list-plugin"
 
 type targets struct {
@@ -283,24 +284,43 @@ func codexProvider(path string) (provider, string, error) {
 		if key == "" {
 			return result, "", errors.New("the selected Codex provider's API key environment variable is empty")
 		}
+		result.Credentials = appendCredential(result.Credentials, credential{key, "bearer"})
 		return result, key, nil
 	}
 	if selected.ExperimentalBearerToken != "" {
-		return result, strings.TrimSpace(selected.ExperimentalBearerToken), nil
+		key := strings.TrimSpace(selected.ExperimentalBearerToken)
+		result.Credentials = appendCredential(result.Credentials, credential{key, "bearer"})
+		return result, key, nil
 	}
 	if selected.RequiresOpenAIAuth || selectedID == "openai" {
-		if key := first(os.Getenv("OPENAI_API_KEY")); key != "" {
-			return result, key, nil
-		}
+		// The client itself reads this credential from auth.json, but the
+		// session that runs this hook may carry an older OPENAI_API_KEY in its
+		// environment.  Keep both: the listing request uses the one the
+		// gateway accepts.
+		result.Credentials = appendCredential(result.Credentials, credential{first(os.Getenv("OPENAI_API_KEY")), "bearer"})
 		var auth struct {
 			APIKey string `json:"OPENAI_API_KEY"`
 		}
-		if err := readJSON(filepath.Join(filepath.Dir(path), "auth.json"), &auth); err != nil {
+		if err := readJSON(filepath.Join(filepath.Dir(path), "auth.json"), &auth); err != nil && len(result.Credentials) == 0 {
 			return result, "", errors.New("could not read the API key from Codex auth.json")
 		}
-		return result, first(auth.APIKey), nil
+		result.Credentials = appendCredential(result.Credentials, credential{first(auth.APIKey), "bearer"})
+		if len(result.Credentials) > 0 {
+			return result, result.Credentials[0].Value, nil
+		}
 	}
 	return result, "", nil
+}
+
+// appendCredential adds one key to a provider's candidate list, skipping an
+// empty value and a pair already there.  The first candidate is the one the
+// client's own configuration names; the rest are what its session carries.
+func appendCredential(list []credential, candidate credential) []credential {
+	candidate.Value = strings.TrimSpace(candidate.Value)
+	if candidate.Value == "" || slices.Contains(list, candidate) {
+		return list
+	}
+	return append(list, candidate)
 }
 
 func resolveProvider(loc locations, host string) (provider, string, error) {
@@ -317,19 +337,24 @@ func resolveProvider(loc locations, host string) (provider, string, error) {
 		configured := strings.TrimRight(first(settings.Env["ANTHROPIC_BASE_URL"]), "/")
 		inherited := strings.TrimRight(first(os.Getenv("ANTHROPIC_BASE_URL")), "/")
 		result := provider{BaseURL: first(configured, inherited), Kind: "anthropic", AuthMode: "x-api-key"}
-		token := first(settings.Env["ANTHROPIC_AUTH_TOKEN"])
-		apiKey := first(settings.Env["ANTHROPIC_API_KEY"])
-		// A hook can inherit values from a session started before the user
-		// changed gateways. Never send that session's key to the new URL.
-		if token == "" && apiKey == "" && (inherited == "" || configured == "" || inherited == configured) {
-			token = first(os.Getenv("ANTHROPIC_AUTH_TOKEN"))
-			apiKey = first(os.Getenv("ANTHROPIC_API_KEY"))
+		result.Credentials = appendCredential(result.Credentials, credential{first(settings.Env["ANTHROPIC_AUTH_TOKEN"]), "anthropic-token"})
+		result.Credentials = appendCredential(result.Credentials, credential{first(settings.Env["ANTHROPIC_API_KEY"]), "x-api-key"})
+		// A hook runs inside the client session, and that session exports the
+		// credential it is using.  A key written in settings.json can be older
+		// than the one the app holds (a gateway key replaced in the app, a file
+		// edited by hand), so the session's value is kept as a fallback -- but
+		// only when it names this same endpoint.  A session started on another
+		// gateway must never hand its key to this URL.
+		if inherited != "" && (configured == "" || inherited == configured) {
+			result.Credentials = appendCredential(result.Credentials, credential{first(os.Getenv("ANTHROPIC_AUTH_TOKEN")), "anthropic-token"})
+			result.Credentials = appendCredential(result.Credentials, credential{first(os.Getenv("ANTHROPIC_API_KEY")), "x-api-key"})
 		}
-		if token != "" {
-			result.AuthMode = "anthropic-token"
-			return result, token, nil
+		if len(result.Credentials) == 0 {
+			return result, "", nil
 		}
-		return result, apiKey, nil
+		primary := result.Credentials[0]
+		result.AuthMode = primary.Mode
+		return result, primary.Value, nil
 	default:
 		return provider{}, "", errors.New("host must be codex or claude")
 	}

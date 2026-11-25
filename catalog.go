@@ -24,6 +24,20 @@ type provider struct {
 	AuthMode         string `json:"authMode,omitempty"`
 	MetadataURL      string `json:"metadataUrl"`
 	AnthropicVersion string `json:"anthropicVersion"`
+	// Credentials are every key this provider's client may present, best
+	// first.  The one a client's own configuration states can be stale -- a
+	// gateway key edited in the app, an environment variable left over from
+	// another install -- while the session that runs this hook carries the key
+	// it is actually using.  The listing request tries them in order and keeps
+	// the one that answers, so the plugin presents the same credential as the
+	// client instead of a copy that happens to be written down.
+	Credentials []credential `json:"-"`
+}
+
+// credential is one key and the header shape it belongs in.
+type credential struct {
+	Value string
+	Mode  string
 }
 
 func (p provider) authMode() string {
@@ -37,6 +51,21 @@ func (p provider) authMode() string {
 		return "x-api-key"
 	}
 	return "bearer"
+}
+
+func (p provider) alternateCredentials(mode, key string) []credential {
+	var result []credential
+	for _, candidate := range p.Credentials {
+		candidate.Value = strings.TrimSpace(candidate.Value)
+		if candidate.Value == "" || (candidate.Value == key && candidate.Mode == mode) {
+			continue
+		}
+		if slices.Contains(result, candidate) {
+			continue
+		}
+		result = append(result, candidate)
+	}
+	return result
 }
 
 type model struct {
@@ -407,6 +436,41 @@ func fetchJSON(ctx context.Context, u *url.URL, auth, key, anthropicVersion stri
 	return result, res.StatusCode, nil
 }
 
+// credentialRejected reports the statuses a gateway uses for a key it will not
+// accept.  400 is one of them: LiteLLM answers a non-master key with no
+// database connected as `{"type":"no_db_connection"}` rather than 401, and a
+// listing GET with no body cannot fail a request-shape check.
+func credentialRejected(status int) bool {
+	return status == http.StatusBadRequest || status == http.StatusUnauthorized || status == http.StatusForbidden
+}
+
+// fetchWithFallback asks for one page with the stated credential, and on a
+// rejection asks again with the provider's other credentials.  A gateway key
+// copied into settings, an environment variable left over from an earlier
+// install and the key the running client actually sends are three different
+// values; only the last one is known to work.  The answer says which
+// credential was accepted so pagination keeps using it.
+func (p provider) fetchWithFallback(
+	ctx context.Context, u *url.URL, mode, key string,
+) (any, int, error, string, string) {
+	payload, status, err := fetchJSON(ctx, u, mode, key, p.AnthropicVersion)
+	if err == nil || !credentialRejected(status) {
+		return payload, status, err, mode, key
+	}
+	for _, candidate := range p.alternateCredentials(mode, key) {
+		payload, altStatus, altErr := fetchJSON(ctx, u, candidate.Mode, candidate.Value, p.AnthropicVersion)
+		if altErr == nil {
+			return payload, altStatus, nil, candidate.Mode, candidate.Value
+		}
+		if !credentialRejected(altStatus) {
+			// The server did not refuse the credential; answer with the real
+			// failure instead of hiding it behind another 401.
+			return payload, altStatus, altErr, mode, key
+		}
+	}
+	return payload, status, err, mode, key
+}
+
 func fetchCatalog(ctx context.Context, p provider, key string) ([]model, error) {
 	base, err := endpoint(p.BaseURL)
 	if err != nil {
@@ -417,14 +481,15 @@ func fetchCatalog(ctx context.Context, p provider, key string) ([]model, error) 
 	var list []modelRow
 	cursors := map[string]bool{}
 	for {
-		payload, status, err := fetchJSON(ctx, u, auth, key, p.AnthropicVersion)
-		if err != nil {
+		payload, status, pageErr, usedMode, usedKey := p.fetchWithFallback(ctx, u, auth, key)
+		auth, key = usedMode, usedKey
+		if pageErr != nil {
 			// A provider with a Codex-native catalog may implement inference
 			// and that catalog without implementing OpenAI model discovery.
 			if len(list) == 0 && p.MetadataURL != "" && (status == 404 || status == 405) {
 				break
 			}
-			return nil, fmt.Errorf("/v1/models: %w", err)
+			return nil, fmt.Errorf("/v1/models: %w", pageErr)
 		}
 		page, ok := rows(payload)
 		if !ok {
@@ -453,7 +518,7 @@ func fetchCatalog(ctx context.Context, p provider, key string) ([]model, error) 
 		if sameOrigin(base, meta) {
 			metaKey = key
 		}
-		payload, _, err := fetchJSON(ctx, meta, auth, metaKey, p.AnthropicVersion)
+		payload, _, err, _, _ := p.fetchWithFallback(ctx, meta, auth, metaKey)
 		if err != nil {
 			return nil, fmt.Errorf("client model_catalog_url: %w", err)
 		}
