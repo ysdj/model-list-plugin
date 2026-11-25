@@ -548,6 +548,50 @@ func TestClaudeListingFallsBackToTheSessionKey(t *testing.T) {
 	}
 }
 
+func TestClaudeSessionKeySurvivesAMissingV1Suffix(t *testing.T) {
+	// Claude Desktop's session exports the bare host while settings.json names
+	// the same host with a /v1 suffix.  Those are one endpoint, so the live key
+	// must still be offered when the stored one is rejected.
+	loc := testLocations(t)
+	var seen []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		key := first(r.Header.Get("x-api-key"), strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
+		seen = append(seen, key)
+		if key != "live-gateway-key" {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":"invalid key"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"data":[{"id":"model-a","max_input_tokens":500000}]}`))
+	}))
+	defer server.Close()
+	t.Setenv("ANTHROPIC_BASE_URL", server.URL)
+	t.Setenv("ANTHROPIC_API_KEY", "live-gateway-key")
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "")
+	if err := writeJSON(loc.ClaudeSettings, map[string]any{"env": map[string]string{
+		"ANTHROPIC_BASE_URL":   server.URL + "/v1/",
+		"ANTHROPIC_AUTH_TOKEN": "stale-gateway-key",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	p, key, err := resolveProvider(loc, "claude")
+	if err != nil || key != "stale-gateway-key" {
+		t.Fatalf("configured key should stay first: %q %v", key, err)
+	}
+	if !strings.HasSuffix(p.BaseURL, "/v1/") {
+		t.Fatalf("the catalog base must keep the suffix the settings name: %q", p.BaseURL)
+	}
+	if len(p.Credentials) != 2 || p.Credentials[1] != (credential{"live-gateway-key", "x-api-key"}) {
+		t.Fatalf("session credential was dropped over a /v1 suffix: %+v", p.Credentials)
+	}
+	if _, err := fetchCatalog(context.Background(), p, key); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(seen, []string{"stale-gateway-key", "live-gateway-key"}) {
+		t.Fatalf("credentials tried: %v", seen)
+	}
+}
+
 func TestClaudeSessionKeyNeverTravelsToAnotherGateway(t *testing.T) {
 	loc := testLocations(t)
 	t.Setenv("ANTHROPIC_BASE_URL", "https://other.example.test")

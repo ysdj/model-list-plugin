@@ -14,7 +14,7 @@ import (
 	"github.com/pelletier/go-toml/v2"
 )
 
-const version = "0.2.3"
+const version = "0.2.4"
 const pluginName = "model-list-plugin"
 
 type targets struct {
@@ -106,6 +106,25 @@ func readJSON(path string, target any) error {
 		return fmt.Errorf("invalid JSON in %s: %w", path, err)
 	}
 	return nil
+}
+
+// sameEndpoint reports whether two base URLs name one gateway.  A client
+// writes the base it sends requests to, and that form is not fixed: Claude
+// Code's settings name https://host/v1 while the desktop session that runs
+// this hook exports https://host.  Both reach the same service, so the
+// session's credential still belongs to it.  The comparison drops a trailing
+// slash and a single trailing /v1, and nothing else -- a genuinely different
+// host keeps its key to itself.
+func sameEndpoint(a, b string) bool {
+	return endpointRoot(a) == endpointRoot(b)
+}
+
+func endpointRoot(value string) string {
+	value = strings.TrimRight(strings.TrimSpace(value), "/")
+	if strings.HasSuffix(strings.ToLower(value), "/v1") {
+		value = value[:len(value)-3]
+	}
+	return strings.TrimRight(value, "/")
 }
 
 func loadConfig(path string) (config, error) {
@@ -334,8 +353,8 @@ func resolveProvider(loc locations, host string) (provider, string, error) {
 		if err := readJSON(loc.ClaudeSettings, &settings); err != nil {
 			return provider{}, "", errors.New("could not read Claude Code settings.json")
 		}
-		configured := strings.TrimRight(first(settings.Env["ANTHROPIC_BASE_URL"]), "/")
-		inherited := strings.TrimRight(first(os.Getenv("ANTHROPIC_BASE_URL")), "/")
+		configured := strings.TrimSpace(first(settings.Env["ANTHROPIC_BASE_URL"]))
+		inherited := strings.TrimSpace(first(os.Getenv("ANTHROPIC_BASE_URL")))
 		result := provider{BaseURL: first(configured, inherited), Kind: "anthropic", AuthMode: "x-api-key"}
 		result.Credentials = appendCredential(result.Credentials, credential{first(settings.Env["ANTHROPIC_AUTH_TOKEN"]), "anthropic-token"})
 		result.Credentials = appendCredential(result.Credentials, credential{first(settings.Env["ANTHROPIC_API_KEY"]), "x-api-key"})
@@ -343,9 +362,11 @@ func resolveProvider(loc locations, host string) (provider, string, error) {
 		// credential it is using.  A key written in settings.json can be older
 		// than the one the app holds (a gateway key replaced in the app, a file
 		// edited by hand), so the session's value is kept as a fallback -- but
-		// only when it names this same endpoint.  A session started on another
-		// gateway must never hand its key to this URL.
-		if inherited != "" && (configured == "" || inherited == configured) {
+		// only when it names this same endpoint.  The two URLs rarely match
+		// literally -- the file carries a /v1 suffix the session omits -- so the
+		// comparison ignores that suffix.  A session started on another gateway
+		// must still never hand its key to this URL.
+		if inherited != "" && (configured == "" || sameEndpoint(inherited, configured)) {
 			result.Credentials = appendCredential(result.Credentials, credential{first(os.Getenv("ANTHROPIC_AUTH_TOKEN")), "anthropic-token"})
 			result.Credentials = appendCredential(result.Credentials, credential{first(os.Getenv("ANTHROPIC_API_KEY")), "x-api-key"})
 		}
