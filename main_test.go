@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -661,4 +662,29 @@ func TestStartupOptionIsAccepted(t *testing.T) {
 	if err != nil || command != "hook" || options["startup"] != "true" {
 		t.Fatalf("startup option not parsed: %q %v %v", command, options, err)
 	}
+}
+
+func TestDesktopBundleIsNamedForThisPlatform(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+	t.Setenv("LOCALAPPDATA", root)
+	versionDir := filepath.Join(root, "Claude-3p", "claude-code", "2.1.330", "hash")
+	bundle := filepath.Join(versionDir, "claude.exe")
+	if runtime.GOOS != "windows" {
+		versionDir = filepath.Join(root, "Library", "Application Support", "Claude-3p", "claude-code", "2.1.330", "hash")
+		bundle = filepath.Join(versionDir, "claude.app", "Contents", "MacOS", "claude")
+	}
+	if err := os.MkdirAll(filepath.Dir(bundle), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(bundle, []byte("stub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	found := desktopHostExecutables("claude")
+	for _, path := range found {
+		if path == bundle {
+			return
+		}
+	}
+	t.Fatalf("bundle %q not named in %v", bundle, found)
 }

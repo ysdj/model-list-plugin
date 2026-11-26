@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -247,12 +248,106 @@ func hostExecutable(host string) string {
 			candidates = append(candidates, filepath.Join(root, "Codex.app", "Contents", "Resources", "codex-cli", "CodexCLI.app", "Contents", "MacOS", "codex"))
 		}
 	}
+	for _, candidate := range desktopHostExecutables(host) {
+		candidates = append(candidates, candidate)
+	}
 	for _, candidate := range candidates {
 		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
 			return candidate
 		}
 	}
 	return host
+}
+
+// desktopHostExecutables names the client an app-only machine has: Claude
+// Desktop and the Codex app each bundle their own CLI and put nothing on PATH,
+// so an update launched from a hook has no command to run unless the bundle is
+// looked for.  The newest bundled version wins.
+func desktopHostExecutables(host string) []string {
+	var roots []string
+	if runtime.GOOS == "windows" {
+		if local := strings.TrimSpace(os.Getenv("LOCALAPPDATA")); local != "" {
+			roots = append(roots, local)
+		}
+		if home, err := os.UserHomeDir(); err == nil && home != "" {
+			roots = append(roots, filepath.Join(home, "AppData", "Local"))
+		}
+	} else if home, err := os.UserHomeDir(); err == nil && home != "" {
+		roots = append(roots, filepath.Join(home, "Library", "Application Support"))
+		roots = append(roots, filepath.Join(home, ".local", "share"))
+	}
+	var found []string
+	for _, root := range roots {
+		bundleRoot := filepath.Join(root, "Claude-3p", "claude-code")
+		if host == "codex" {
+			bundleRoot = filepath.Join(root, "Codex", "claude-code")
+		}
+		for _, version := range newestFirst(bundleRoot) {
+			for _, path := range bundleBinaries(filepath.Join(bundleRoot, version), host) {
+				found = append(found, path)
+			}
+		}
+	}
+	return found
+}
+
+// newestFirst lists the version directories of a bundle, newest first.
+func newestFirst(root string) []string {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return nil
+	}
+	type stamped struct {
+		name    string
+		modTime int64
+	}
+	var versions []stamped
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		versions = append(versions, stamped{entry.Name(), info.ModTime().UnixNano()})
+	}
+	sort.Slice(versions, func(i, j int) bool { return versions[i].modTime > versions[j].modTime })
+	names := make([]string, 0, len(versions))
+	for _, version := range versions {
+		names = append(names, version.name)
+	}
+	return names
+}
+
+// bundleBinaries names the client inside one bundled version directory: the
+// Windows build keeps claude.exe one level down, the macOS build wraps it in
+// an app.
+func bundleBinaries(versionDir, host string) []string {
+	if runtime.GOOS == "windows" {
+		var paths []string
+		entries, err := os.ReadDir(versionDir)
+		if err != nil {
+			return nil
+		}
+		for _, entry := range entries {
+			if entry.IsDir() {
+				paths = append(paths, filepath.Join(versionDir, entry.Name(), host+".exe"))
+			}
+		}
+		return paths
+	}
+	var paths []string
+	entries, err := os.ReadDir(versionDir)
+	if err != nil {
+		return nil
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			paths = append(paths, filepath.Join(versionDir, entry.Name(), host+".app", "Contents", "MacOS", host))
+		}
+	}
+	return paths
 }
 
 func hostExec(ctx context.Context, host string, args ...string) *exec.Cmd {
@@ -280,7 +375,11 @@ func updateHost(host string) error {
 		output, err := command.CombinedOutput()
 		cancel()
 		if err != nil {
-			return fmt.Errorf("%s %s failed: %s", host, strings.Join(args, " "), strings.TrimSpace(string(output)))
+			detail := strings.TrimSpace(string(output))
+			if detail == "" {
+				detail = err.Error()
+			}
+			return fmt.Errorf("%s %s failed: %s", host, strings.Join(args, " "), detail)
 		}
 	}
 	return nil
