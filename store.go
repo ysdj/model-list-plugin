@@ -14,7 +14,7 @@ import (
 	"github.com/pelletier/go-toml/v2"
 )
 
-const version = "0.2.4"
+const version = "0.2.5"
 const pluginName = "model-list-plugin"
 
 type targets struct {
@@ -355,9 +355,22 @@ func resolveProvider(loc locations, host string) (provider, string, error) {
 		}
 		configured := strings.TrimSpace(first(settings.Env["ANTHROPIC_BASE_URL"]))
 		inherited := strings.TrimSpace(first(os.Getenv("ANTHROPIC_BASE_URL")))
-		result := provider{BaseURL: first(configured, inherited), Kind: "anthropic", AuthMode: "x-api-key"}
+		// A session this app started names its gateway in the app's own
+		// deployment configuration, not in settings.json.  Reading it is what
+		// lets the hook work at all when the user has written no env block.
+		desktop := claudeDesktopConfig{}
+		if configured == "" && inherited == "" {
+			desktop, _ = desktopGateway()
+		}
+		named := first(configured, desktop.BaseURL)
+		result := provider{BaseURL: first(named, inherited), Kind: "anthropic", AuthMode: "x-api-key"}
 		result.Credentials = appendCredential(result.Credentials, credential{first(settings.Env["ANTHROPIC_AUTH_TOKEN"]), "anthropic-token"})
 		result.Credentials = appendCredential(result.Credentials, credential{first(settings.Env["ANTHROPIC_API_KEY"]), "x-api-key"})
+		desktopMode := "x-api-key"
+		if scheme := strings.ToLower(desktop.AuthScheme); strings.Contains(scheme, "bearer") {
+			desktopMode = "anthropic-token"
+		}
+		result.Credentials = appendCredential(result.Credentials, credential{desktop.APIKey, desktopMode})
 		// A hook runs inside the client session, and that session exports the
 		// credential it is using.  A key written in settings.json can be older
 		// than the one the app holds (a gateway key replaced in the app, a file
@@ -365,12 +378,18 @@ func resolveProvider(loc locations, host string) (provider, string, error) {
 		// only when it names this same endpoint.  The two URLs rarely match
 		// literally -- the file carries a /v1 suffix the session omits -- so the
 		// comparison ignores that suffix.  A session started on another gateway
-		// must still never hand its key to this URL.
-		if inherited != "" && (configured == "" || sameEndpoint(inherited, configured)) {
+		// must still never hand its key to this URL.  A session whose own
+		// environment names no gateway at all was started by the app for the
+		// endpoint the app's configuration names, so its key belongs there.
+		trustsSession := named != "" && (inherited == "" || sameEndpoint(inherited, named))
+		if trustsSession {
 			result.Credentials = appendCredential(result.Credentials, credential{first(os.Getenv("ANTHROPIC_AUTH_TOKEN")), "anthropic-token"})
 			result.Credentials = appendCredential(result.Credentials, credential{first(os.Getenv("ANTHROPIC_API_KEY")), "x-api-key"})
 		}
 		if len(result.Credentials) == 0 {
+			if desktop.SealedKey {
+				return result, "", errors.New("the Claude Desktop app holds the gateway key sealed; set ANTHROPIC_API_KEY in the env block of the Claude Code settings.json this machine uses, so the hook can authenticate")
+			}
 			return result, "", nil
 		}
 		primary := result.Credentials[0]

@@ -323,6 +323,15 @@ func due(timestamp string, interval time.Duration) bool {
 	return err != nil || time.Since(last) >= interval
 }
 
+// updateInterval is how often a prompt-triggered hook looks for a release.  A
+// session start does not wait for it: the client only loads an updated plugin
+// when it starts, so that is the one check worth making every time.
+const updateInterval = 24 * time.Hour
+
+func updateDue(lastCheck string, startup bool) bool {
+	return startup || due(lastCheck, updateInterval)
+}
+
 func printJSON(value any) {
 	output, _ := json.MarshalIndent(value, "", "  ")
 	fmt.Println(string(output))
@@ -339,7 +348,7 @@ func run(args []string) error {
 	}
 	for option := range options {
 		switch option {
-		case "host", "force", "defer", "parent-pid":
+		case "host", "force", "defer", "parent-pid", "startup":
 		default:
 			return fmt.Errorf("unknown option --%s", option)
 		}
@@ -549,7 +558,13 @@ func run(args []string) error {
 		if cfg.Enabled && enabledTarget && (options["force"] == "true" || due(saved.LastSyncAtByTarget[host], time.Duration(cfg.SyncIntervalSeconds)*time.Second)) {
 			_, _ = syncModels(cfg, loc, &saved, host)
 		}
-		if due(saved.LastUpdateCheckAtByHost[host], 24*time.Hour) {
+		// A session start is the moment to look for a release: the client only
+		// runs an updated plugin when it starts, so a check that waits for a
+		// quiet hour trades that first chance away.  The update itself runs in
+		// a detached copy that waits for this process to exit, so a start is
+		// never held up by it.  Other hook events keep the periodic check.
+		startup := options["startup"] == "true"
+		if updateDue(saved.LastUpdateCheckAtByHost[host], startup) {
 			if saved.LastUpdateCheckAtByHost == nil {
 				saved.LastUpdateCheckAtByHost = map[string]string{}
 			}

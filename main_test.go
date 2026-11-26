@@ -642,3 +642,23 @@ func TestCodexListingFallsBackToAuthJSON(t *testing.T) {
 		t.Fatalf("credentials tried: %v", seen)
 	}
 }
+
+func TestUpdateDueChecksAtEveryStartup(t *testing.T) {
+	just := time.Now().UTC().Format(time.RFC3339Nano)
+	if updateDue(just, false) {
+		t.Fatal("a recent check must not repeat on a prompt")
+	}
+	if !updateDue(just, true) {
+		t.Fatal("a session start must check even after a recent check")
+	}
+	if !updateDue("", false) || !updateDue("not a timestamp", false) {
+		t.Fatal("an unknown last check is due")
+	}
+}
+
+func TestStartupOptionIsAccepted(t *testing.T) {
+	command, options, err := parseArgs([]string{"hook", "--host", "claude", "--startup"})
+	if err != nil || command != "hook" || options["startup"] != "true" {
+		t.Fatalf("startup option not parsed: %q %v %v", command, options, err)
+	}
+}
