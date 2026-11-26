@@ -81,7 +81,15 @@ func desktopGatewayFrom(dirs []string) (claudeDesktopConfig, bool) {
 			key := strings.TrimSpace(document.APIKey)
 			sealed := strings.HasPrefix(key, sealedKeyPrefix)
 			if sealed {
-				key = ""
+				// The app sealed it for this user's key store.  Read it when the
+				// platform lets a process of that user do so; otherwise leave it
+				// alone and let the caller find another credential.
+				if opened, err := unsealSecret(key); err == nil {
+					key = opened
+					sealed = false
+				} else {
+					key = ""
+				}
 			}
 			return claudeDesktopConfig{
 				BaseURL:    base,
