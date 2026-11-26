@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -225,7 +227,7 @@ func TestSyncAndRestorePreservesOtherChanges(t *testing.T) {
 	if err := writeFile(loc.CodexConfig, []byte(originalConfig)); err != nil {
 		t.Fatal(err)
 	}
-	originalSettings := map[string]any{"env": map[string]string{"KEEP": "yes", "ANTHROPIC_BASE_URL": server.URL}, "modelPicker": map[string]any{"options": []any{}}, "modelSettings": map[string]any{"remote-model": map[string]any{"autoCompactWindow": 140000, "other": "before"}}}
+	originalSettings := map[string]any{"env": map[string]string{"KEEP": "yes", "ANTHROPIC_BASE_URL": server.URL, "ANTHROPIC_AUTH_TOKEN": "test-gateway-key"}, "modelPicker": map[string]any{"options": []any{}}, "modelSettings": map[string]any{"remote-model": map[string]any{"autoCompactWindow": 140000, "other": "before"}}}
 	if err := writeJSON(loc.ClaudeSettings, originalSettings); err != nil {
 		t.Fatal(err)
 	}
@@ -348,7 +350,9 @@ func TestHostEnableDisableAndFailure(t *testing.T) {
 	if _, err := os.Stat(loc.ClaudeSettings); !os.IsNotExist(err) {
 		t.Fatalf("Claude modified: %v", err)
 	}
-	if err := writeJSON(filepath.Join(root, "claude", "settings.json"), map[string]any{"env": map[string]string{"ANTHROPIC_BASE_URL": server.URL}}); err != nil {
+	// A gateway named only by URL has no credential for the hook to present,
+	// so the test supplies the key the same way an operator would.
+	if err := writeJSON(filepath.Join(root, "claude", "settings.json"), map[string]any{"env": map[string]string{"ANTHROPIC_BASE_URL": server.URL, "ANTHROPIC_AUTH_TOKEN": "test-gateway-key"}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := run([]string{"enable", "--host", "claude"}); err != nil {
@@ -434,9 +438,12 @@ experimental_bearer_token = 'fixture-codex-key'
 	}
 	if err := writeFile(loc.ClaudeSettings, []byte(`{"env":{"ANTHROPIC_BASE_URL":"https://claude.example.test"}}`)); err != nil {
 		t.Fatal(err)
-	}
-	if _, key, err := resolveProvider(loc, "claude"); err != nil || key != "" {
-		t.Fatal("the new Claude endpoint inherited a credential from the old session")
+		// The endpoint changed, so the old session's key must not follow it.  The
+		// resolver now reports that it has nothing to present instead of returning
+		// an empty key that turns into a bare 401 later on.
+		if _, key, err := resolveProvider(loc, "claude"); key != "" || err == nil {
+			t.Fatalf("the new Claude endpoint should report that it has no key, got %q, %v", key, err)
+		}
 	}
 }
 
@@ -603,8 +610,13 @@ func TestClaudeSessionKeyNeverTravelsToAnotherGateway(t *testing.T) {
 		t.Fatal(err)
 	}
 	p, key, err := resolveProvider(loc, "claude")
-	if err != nil || key != "" || len(p.Credentials) != 0 {
+	if key != "" || len(p.Credentials) != 0 {
 		t.Fatalf("another gateway's key was adopted: %+v %q %v", p.Credentials, key, err)
+	}
+	// Nothing to present is now reported, so the sync fails with a message that
+	// names the fix instead of a bare 401 from the listing call.
+	if err == nil || !strings.Contains(err.Error(), "no gateway key") {
+		t.Fatalf("an empty credential should be reported, got %v", err)
 	}
 }
 
@@ -687,4 +699,162 @@ func TestDesktopBundleIsNamedForThisPlatform(t *testing.T) {
 		}
 	}
 	t.Fatalf("bundle %q not named in %v", bundle, found)
+}
+
+// TestClaudeBehaviorCoversStatedWindow pins the regression behind a gateway
+// model showing 200K.  Claude Code resolves a session's window as
+// min(assumedWindow, autoCompactWindow), so a row that borrows a behavior
+// assuming less than the provider states silently truncates it.
+func TestClaudeBehaviorCoversStatedWindow(t *testing.T) {
+	cases := []struct {
+		stated int
+		want   string
+	}{
+		// The window considered is the one the projection states, so a claim
+		// above the ceiling is matched at the ceiling.
+		{200000, "claude-sonnet-4-6"},
+		{262144, "claude-opus-4-8"},
+		{500000, "claude-opus-4-8"},
+		{1000000, "claude-opus-4-8"},
+		{1048576, "claude-opus-4-8"},
+		{0, "claude-opus-5-5"},
+	}
+	for _, c := range cases {
+		window, _ := claudeCompactWindow(c.stated)
+		if got := claudeBehavior(window); got != c.want {
+			t.Errorf("claudeBehavior(%d) = %q, want %q", c.stated, got, c.want)
+		}
+	}
+	// Whatever a row borrows must be able to carry the window the projection
+	// states, which is what the client compares against.
+	for _, c := range cases {
+		window, stated := claudeCompactWindow(c.stated)
+		if !stated {
+			continue
+		}
+		behavior := claudeBehavior(window)
+		assumed := 0
+		for _, candidate := range claudeBehaviorWindows {
+			if candidate.model == behavior {
+				assumed = candidate.window
+			}
+		}
+		if assumed < window {
+			t.Errorf("behavior %q assumes %d, below the projected %d", behavior, assumed, window)
+		}
+	}
+}
+
+// TestClaudeProjectionWritesEveryOfferedModel guards the case that produced a
+// 200K readout for a model the provider describes without a context window:
+// the row must still be offered, and it must still get an entry so a stale one
+// cannot survive and an absent one cannot fall back to 200000.
+func TestClaudeProjectionWritesEveryOfferedModel(t *testing.T) {
+	models := []model{
+		{ID: "windowed", Label: "Windowed", Window: 500000},
+		{ID: "unwindowed", Label: "Unwindowed"},
+		{ID: "tiny", Label: "Tiny", Window: 4096},
+	}
+	picker, windows := claudeProjection(models, "raw")
+
+	var parsed struct {
+		Options []struct {
+			Model     string `json:"model"`
+			BehavesAs string `json:"behavesAs"`
+		} `json:"options"`
+	}
+	if err := json.Unmarshal(picker, &parsed); err != nil {
+		t.Fatal(err)
+	}
+	seen := make(map[string]string, len(parsed.Options))
+	for _, option := range parsed.Options {
+		seen[option.Model] = option.BehavesAs
+	}
+	for _, id := range []string{"windowed", "unwindowed", "tiny"} {
+		if _, ok := seen[id]; !ok {
+			t.Errorf("model %q was not offered", id)
+		}
+	}
+	if len(windows) != len(models) {
+		t.Fatalf("expected an entry per model, got %d", len(windows))
+	}
+	if got := string(windows["windowed"]); got != `{"autoCompactWindow":500000}` {
+		t.Errorf("windowed entry = %s", got)
+	}
+	if got := string(windows["unwindowed"]); got != `{}` {
+		t.Errorf("a model without a stated window should carry no window, got %s", got)
+	}
+	if got := string(windows["tiny"]); got != `{"autoCompactWindow":100000}` {
+		t.Errorf("a window below the floor should clamp up, got %s", got)
+	}
+	for _, option := range parsed.Options {
+		if option.Model == "windowed" && option.BehavesAs == "claude-sonnet-4-6" {
+			t.Errorf("a %d-token model must not borrow the 200K behavior", 500000)
+		}
+	}
+}
+
+// TestClaudeProjectionOffersLegacyIdsTheirOwnBehavior reproduces the readout
+// that made this fix necessary: Claude Desktop pins a session to the model id
+// it was created with, and a session created by an older release still runs a
+// hashed alias.  Claude Code resolves a name it does not know from that name's
+// own modelPicker row -- with no row it assumes 200000, and the app's injected
+// CLAUDE_CODE_MAX_CONTEXT_TOKENS holds it there no matter what modelSettings
+// says.  Measured through the app's own get_context_usage channel with that
+// injection in place, "claude-mythos-495a09" read 200000 with no row and
+// 500000 once its row carried behavesAs, so every legacy spelling must be
+// offered a row of its own.
+func TestClaudeProjectionOffersLegacyIdsTheirOwnBehavior(t *testing.T) {
+	models := []model{{ID: "gpt-6.2-sol", Label: "gpt-6.2-sol", Window: 500000}}
+	picker, windows := claudeProjection(models, "derived")
+
+	hash := sha256.Sum256([]byte("gpt-6.2-sol"))
+	legacy := "claude-mythos-" + hex.EncodeToString(hash[:])[:6]
+
+	var parsed struct {
+		Options []struct {
+			Model     string `json:"model"`
+			BehavesAs string `json:"behavesAs"`
+		} `json:"options"`
+	}
+	if err := json.Unmarshal(picker, &parsed); err != nil {
+		t.Fatal(err)
+	}
+	behaviors := make(map[string]string, len(parsed.Options))
+	for _, option := range parsed.Options {
+		behaviors[option.Model] = option.BehavesAs
+	}
+	for _, id := range []string{legacy, legacy + "[1m]"} {
+		if behaviors[id] == "" {
+			t.Errorf("legacy id %q has no behavesAs row, so its session reads 200K", id)
+		}
+	}
+	if got := string(windows[legacy]); got != `{"autoCompactWindow":500000}` {
+		t.Errorf("legacy window entry = %s", got)
+	}
+}
+
+// TestNormalizeDerivesWindowFromOutputCap covers endpoints that publish a model
+// with only an output cap.  The window has to be derived from it, because a
+// zero window is what sends the client back to its 200000 fallback.
+func TestNormalizeDerivesWindowFromOutputCap(t *testing.T) {
+	rows := []modelRow{
+		{id: "cap-only", fields: object{"max_tokens": float64(32000)}},
+		{id: "both", fields: object{"max_tokens": float64(32000), "max_input_tokens": float64(128000)}},
+		{id: "none", fields: object{}},
+	}
+	got := normalize(rows, nil)
+	byID := make(map[string]int, len(got))
+	for _, m := range got {
+		byID[m.ID] = m.Window
+	}
+	if byID["cap-only"] != 128000 {
+		t.Errorf("cap-only window = %d, want 128000", byID["cap-only"])
+	}
+	if byID["both"] != 128000 {
+		t.Errorf("a stated window must win over a derived one, got %d", byID["both"])
+	}
+	if byID["none"] != 0 {
+		t.Errorf("a model with no numbers should stay at 0, got %d", byID["none"])
+	}
 }

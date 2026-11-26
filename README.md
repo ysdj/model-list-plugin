@@ -28,6 +28,13 @@ The key is taken from the same place the client reads it. A copy can lag behind:
 
 When a listed model has no context window, the plugin looks it up in the same public catalogs used by Young Router: Pi, the Codex catalog, and models.dev. The plugin caches this public data for six hours. Unmatched models use the client's defaults. Claude Code's auto-compaction window stays within its supported range.
 
+Claude Code resolves a model's window from the picker row that names it: an id
+it does not recognise falls back to 200000, and Claude Desktop pins that
+fallback for the whole session. A session also keeps the id it was created
+with, so the projection offers every spelling of a model — including the
+aliases earlier releases generated — a row of its own, and states the window
+under each of those ids.
+
 ## Synchronization and updates
 
 Hooks run on session start and prompt submission, with a default minimum interval of 60 seconds per agent. Changes are fetched on a later hook invocation. The host may require a new session to reload a changed catalog or plugin version.

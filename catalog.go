@@ -71,8 +71,12 @@ func (p provider) alternateCredentials(mode, key string) []credential {
 type model struct {
 	ID, Label, Description, ClaudeAlias, BehavesAs, DefaultEffort string
 	Window, MaxWindow, EffectivePercent                           int
-	Efforts, Inputs                                               []string
-	NonChat                                                       bool
+	// MaxOutput is the provider's stated output cap.  An endpoint may leave the
+	// conversation window implicit while still stating this, so it is the one
+	// remaining clue for a model that would otherwise borrow 200000.
+	MaxOutput       int
+	Efforts, Inputs []string
+	NonChat         bool
 }
 
 var efforts = []string{"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}
@@ -235,6 +239,9 @@ func (m *model) read(row object) {
 		if m.MaxWindow == 0 {
 			m.MaxWindow = intField(p, "max_context_window", "maxContextWindow", "max_context_tokens", "maxContextTokens")
 		}
+		if m.MaxOutput == 0 {
+			m.MaxOutput = intField(p, "max_tokens", "maxTokens", "max_output_tokens", "maxOutputTokens", "output_token_limit", "outputTokenLimit")
+		}
 		if m.EffectivePercent == 0 {
 			if percent := intField(p, "effective_context_window_percent", "effectiveContextWindowPercent"); percent <= 100 {
 				m.EffectivePercent = percent
@@ -350,6 +357,14 @@ func normalize(list, metadata []modelRow) []model {
 		m.Label = first(m.Label, m.ID)
 		if m.Window == 0 {
 			m.Window = m.MaxWindow
+		}
+		// An endpoint that states only an output cap still describes a real
+		// conversation model.  Leaving the window at zero makes Claude Code fall
+		// back to the 200000 it assumes for a name it does not recognise; a
+		// window built around the stated cap is the conservative reading of the
+		// same number the provider already publishes.
+		if m.Window == 0 && m.MaxOutput > 0 {
+			m.Window = m.MaxOutput + m.MaxOutput*3
 		}
 		if m.Window > m.MaxWindow {
 			m.MaxWindow = m.Window

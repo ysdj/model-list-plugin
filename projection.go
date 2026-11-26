@@ -217,36 +217,150 @@ func sameJSON(a, b json.RawMessage) bool {
 	return reflect.DeepEqual(left, right)
 }
 
+// claudeWindowFloor is the smallest auto-compact window Claude Code accepts in
+// modelSettings.  A smaller number is rejected, so a model whose provider
+// states a narrower window is clamped up to it.
+const claudeWindowFloor = 100000
+
+// claudeWindowCeiling is the largest window the projection claims.  A model
+// that declares more keeps its real window in every other catalog; the Claude
+// projection stays inside the range a gateway credential can reach.
+const claudeWindowCeiling = 1000000
+
+// claudeBehaviorWindows lists the built-in models a picker row can borrow its
+// behaviour from, smallest assumed window first, with the context window
+// Claude Code assumes for each.
+//
+// The choice matters more than it looks: Claude Code resolves a session's
+// auto-compact window as min(assumedWindow, autoCompactWindow).  A row that
+// borrows claude-sonnet-4-6 therefore never reports more than 200000 no matter
+// what the provider states, which is how a 500K model ends up showing 200K.
+// Picking the smallest behaviour that still covers the model keeps the
+// projection exact instead of silently truncating it.
+var claudeBehaviorWindows = []struct {
+	model  string
+	window int
+}{
+	{"claude-sonnet-4-6", 200000},
+	{"claude-opus-4-8", 1000000},
+	{"claude-opus-5-5", 1000000},
+}
+
+// claudeBehavior picks the behaviour a row borrows.  A model that states its
+// own window borrows the smallest assumed window that still covers it, so the
+// row is never capped below what the provider promised.  A model that states no
+// window borrows the widest one, which leaves Claude Code's own assumption in
+// place instead of forcing an unknown model onto the 200000 fallback.
+func claudeBehavior(window int) string {
+	if window > 0 {
+		for _, candidate := range claudeBehaviorWindows {
+			if candidate.window >= window {
+				return candidate.model
+			}
+		}
+	}
+	return "claude-opus-5-5"
+}
+
+// claudeCompactWindow is the auto-compact window written for one model, and
+// whether the provider actually stated one.  The window is the one this
+// projection states, so both the picker's behaviour and the entry are chosen
+// from the same number: a model that declares more than the ceiling, such as a
+// 1048576-token Gemini, has to borrow a behaviour that covers the claim rather
+// than one matched to the raw figure.
+func claudeCompactWindow(window int) (int, bool) {
+	if window <= 0 {
+		return 0, false
+	}
+	return max(claudeWindowFloor, min(window, claudeWindowCeiling)), true
+}
+
+// claudeModelID is the name a model is published under.
+func claudeModelID(raw model, mode string) string {
+	id := raw.ID
+	if mode == "metadata" && raw.ClaudeAlias != "" {
+		id = raw.ClaudeAlias
+	}
+	if mode == "derived" {
+		sum := sha256.Sum256([]byte(id))
+		id = "claude-mythos-" + hex.EncodeToString(sum[:])[:6]
+	}
+	return id
+}
+
+// historicalAliases names the ids the same model was published under before
+// this release, plus the "[1m]" spelling the desktop app appends when it pins a
+// model.  A desktop session keeps the id it was created with, so a model whose
+// published name changed still leaves sessions behind that send the old name;
+// those names need a window too, or they resolve as an unrecognised model.
+func historicalAliases(id, mode string) []string {
+	var aliases []string
+	add := func(value string) {
+		if value == "" || value == id {
+			return
+		}
+		for _, existing := range aliases {
+			if existing == value {
+				return
+			}
+		}
+		aliases = append(aliases, value)
+	}
+	// The desktop app pins a model with a "[1m]" suffix, and a session created
+	// before this release may hold either spelling of the same name.
+	base := strings.TrimSuffix(id, "[1m]")
+	add(base)
+	add(base + "[1m]")
+	// A derived id replaced the provider id entirely, so a desktop session may
+	// still send the hashed name this release no longer publishes.  The window
+	// follows the model, not its name, so the hashed spelling keeps the entry.
+	sum := sha256.Sum256([]byte(base))
+	hashed := "claude-mythos-" + hex.EncodeToString(sum[:])[:6]
+	add(hashed)
+	add(hashed + "[1m]")
+	return aliases
+}
+
 func claudeProjection(models []model, mode string) (json.RawMessage, map[string]json.RawMessage) {
 	options := make([]object, 0, len(models))
 	windows := make(map[string]json.RawMessage)
 	for _, m := range models {
-		id := m.ID
-		if mode == "metadata" && m.ClaudeAlias != "" {
-			id = m.ClaudeAlias
-		}
-		if mode == "derived" {
-			sum := sha256.Sum256([]byte(id))
-			id = "claude-mythos-" + hex.EncodeToString(sum[:])[:6]
-		}
+		id := claudeModelID(m, mode)
+		window, stated := claudeCompactWindow(m.Window)
 		behavior := m.BehavesAs
 		if behavior == "" {
-			switch {
-			case m.Window >= 1000000:
-				behavior = "claude-opus-5-5"
-			case m.Window > 200000:
-				behavior = "claude-opus-4-8"
-			default:
-				behavior = "claude-sonnet-4-6"
-			}
+			behavior = claudeBehavior(window)
 		}
 		row := object{"model": id, "label": m.Label, "behavesAs": behavior}
 		if m.Description != "" {
 			row["description"] = m.Description
 		}
 		options = append(options, row)
-		if m.Window > 0 {
-			windows[id] = rawJSON(object{"autoCompactWindow": max(100000, min(m.Window, 1000000))})
+		// A model whose provider states no window is written with an empty
+		// object rather than skipped: skipping it leaves a stale entry behind
+		// for a row Claude Code no longer describes, and an absent entry sends
+		// the session back to the 200000 Claude Code assumes for an
+		// unrecognised name.
+		if stated {
+			windows[id] = rawJSON(object{"autoCompactWindow": window})
+		} else {
+			windows[id] = rawJSON(object{})
+		}
+		// Claude Desktop pins a session to the id it was created with, and a
+		// session created before this release still runs an older spelling of
+		// the same model.  Claude Code resolves the window of a name it does
+		// not know from that name's own modelPicker row: with no row it falls
+		// back to the 200000 it assumes, and the app's injected
+		// CLAUDE_CODE_MAX_CONTEXT_TOKENS pins it there whatever
+		// modelSettings says.  Measured through the app's own channel
+		// (get_context_usage) with that injection in place, a legacy id read
+		// 200000 and the same id with a behavesAs row read the row's window.
+		// So every id a session may still send is offered a row of its own.
+		if behavior == "" {
+			continue
+		}
+		for _, alias := range historicalAliases(id, mode) {
+			options = append(options, object{"model": alias, "label": alias, "behavesAs": behavior})
 		}
 	}
 	return rawJSON(object{"replaceBuiltInOptions": true, "options": options}), windows
@@ -350,7 +464,25 @@ func applyClaude(models []model, loc locations, managed *managedState, mode stri
 		}
 		var projected map[string]json.RawMessage
 		_ = json.Unmarshal(value, &projected)
-		current["autoCompactWindow"] = projected["autoCompactWindow"]
+		// A session keeps the model id it was created with.  When an earlier
+		// release published the same model under a derived or alias id, every
+		// desktop session built on it still sends that id, and an id with no
+		// entry falls back to the 200000 Claude Code assumes for a name it does
+		// not recognise.  Carry the window across to those ids, including the
+		// "[1m]" spelling the desktop app appends, so an existing session keeps
+		// its window instead of losing it when the published name changes.
+		if window, ok := projected["autoCompactWindow"]; ok && len(window) > 0 && string(window) != "null" {
+			for _, alias := range historicalAliases(id, mode) {
+				if _, exists := existing[alias]; !exists {
+					existing[alias] = rawJSON(object{"autoCompactWindow": window})
+				}
+			}
+		}
+		if window, ok := projected["autoCompactWindow"]; ok && len(window) > 0 && string(window) != "null" {
+			current["autoCompactWindow"] = window
+		} else {
+			delete(current, "autoCompactWindow")
+		}
 		existing[id] = rawJSON(current)
 		windows[id] = existing[id]
 	}

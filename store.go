@@ -14,7 +14,7 @@ import (
 	"github.com/pelletier/go-toml/v2"
 )
 
-const version = "0.2.7"
+const version = "0.2.9"
 const pluginName = "model-list-plugin"
 
 type targets struct {
@@ -387,10 +387,15 @@ func resolveProvider(loc locations, host string) (provider, string, error) {
 			result.Credentials = appendCredential(result.Credentials, credential{first(os.Getenv("ANTHROPIC_API_KEY")), "x-api-key"})
 		}
 		if len(result.Credentials) == 0 {
+			// No key reached this process.  Name the fix rather than the
+			// symptom: the app seals its own copy, so a gateway configured
+			// only in the app leaves the hook with nothing to present, and
+			// the listing call fails with a bare 401 that says nothing about
+			// where the key should come from.
 			if desktop.SealedKey {
-				return result, "", errors.New("the Claude Desktop app holds the gateway key sealed; set ANTHROPIC_API_KEY in the env block of the Claude Code settings.json this machine uses, so the hook can authenticate")
+				return result, "", errors.New("the Claude Desktop app holds the gateway key sealed, so this hook cannot read it; give the hook a key of its own: set ANTHROPIC_AUTH_TOKEN (or ANTHROPIC_API_KEY) in the env block of the Claude Code settings.json this machine uses")
 			}
-			return result, "", nil
+			return result, "", errors.New("no gateway key reached this hook; set ANTHROPIC_AUTH_TOKEN (or ANTHROPIC_API_KEY) in the env block of the Claude Code settings.json this machine uses, or in the environment the client starts this session from")
 		}
 		primary := result.Credentials[0]
 		result.AuthMode = primary.Mode
