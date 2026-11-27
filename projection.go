@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -227,39 +228,21 @@ const claudeWindowFloor = 100000
 // projection stays inside the range a gateway credential can reach.
 const claudeWindowCeiling = 1000000
 
-// claudeBehaviorWindows lists the built-in models a picker row can borrow its
-// behaviour from, smallest assumed window first, with the context window
-// Claude Code assumes for each.
-//
-// The choice matters more than it looks: Claude Code resolves a session's
-// auto-compact window as min(assumedWindow, autoCompactWindow).  A row that
-// borrows claude-sonnet-4-6 therefore never reports more than 200000 no matter
-// what the provider states, which is how a 500K model ends up showing 200K.
-// Picking the smallest behaviour that still covers the model keeps the
-// projection exact instead of silently truncating it.
-var claudeBehaviorWindows = []struct {
-	model  string
-	window int
-}{
-	{"claude-sonnet-4-6", 200000},
-	{"claude-opus-4-8", 1000000},
-	{"claude-opus-5-5", 1000000},
-}
-
-// claudeBehavior picks the behaviour a row borrows.  A model that states its
-// own window borrows the smallest assumed window that still covers it, so the
-// row is never capped below what the provider promised.  A model that states no
-// window borrows the widest one, which leaves Claude Code's own assumption in
-// place instead of forcing an unknown model onto the 200000 fallback.
+// claudeBehavior picks the behaviour a row borrows when the provider states no
+// "behaves_as".  The tiers are the client-side ones Young Router's picker uses:
+// a route at or above 1M borrows the full 1M entry, a route between the 200k
+// default and 1M borrows the large entry with the smaller output claim, and a
+// route at or below 200k -- or one whose provider states no window -- borrows
+// the default tier.  Keeping the two writers on the same rule is what makes a
+// provider that states only a window produce the same row either way.
 func claudeBehavior(window int) string {
-	if window > 0 {
-		for _, candidate := range claudeBehaviorWindows {
-			if candidate.window >= window {
-				return candidate.model
-			}
-		}
+	if window >= 1000000 {
+		return "claude-opus-5-5"
 	}
-	return "claude-opus-5-5"
+	if window > 200000 {
+		return "claude-opus-4-8"
+	}
+	return "claude-sonnet-4-6"
 }
 
 // claudeCompactWindow is the auto-compact window written for one model, and
@@ -288,52 +271,83 @@ func claudeModelID(raw model, mode string) string {
 	return id
 }
 
-// historicalAliases names the ids the same model was published under before
-// this release, plus the "[1m]" spelling the desktop app appends when it pins a
-// model.  A desktop session keeps the id it was created with, so a model whose
-// published name changed still leaves sessions behind that send the old name;
-// those names need a window too, or they resolve as an unrecognised model.
-func historicalAliases(id, mode string) []string {
-	var aliases []string
-	add := func(value string) {
-		if value == "" || value == id {
-			return
-		}
-		for _, existing := range aliases {
-			if existing == value {
-				return
-			}
-		}
-		aliases = append(aliases, value)
+var claudeDerivedPattern = regexp.MustCompile(`^(?:claude-mythos-|claude-fable-)[0-9a-f]{6}$`)
+
+// claudeKeepsID reports whether the client already recognizes this id as its
+// own.  A real Claude id keeps its label, effort ladder and behavior from the
+// client catalog; a derived alias has none of those and needs a row that names
+// the substitute.  The pattern is the same one Young Router uses for the two
+// alias families it has published, so a real id such as “claude-fable-5-2“
+// is not mistaken for an alias.
+func claudeKeepsID(id string) bool {
+	text := strings.ToLower(strings.TrimSuffix(id, "[1m]"))
+	return strings.HasPrefix(text, "claude-") && !claudeDerivedPattern.MatchString(text)
+}
+
+// claudeDerivedAlias reports whether a modelSettings key is one of the derived
+// spellings this plugin may have written.  A key under a public name, or one a
+// person typed, is never retired here.
+func claudeDerivedAlias(key string) bool {
+	return claudeDerivedPattern.MatchString(strings.ToLower(strings.TrimSuffix(key, "[1m]")))
+}
+
+// claudeBehaviorFor chooses the behavior a row borrows.  A provider that
+// states behaves_as is authoritative.  In metadata mode an alias without a
+// behavior is a statement that the client already knows the id, so no
+// substitute is invented; outside metadata mode the window decides.
+func claudeBehaviorFor(m model, mode, id string) string {
+	if m.BehavesAs != "" {
+		return m.BehavesAs
 	}
-	// The desktop app pins a model with a "[1m]" suffix, and a session created
-	// before this release may hold either spelling of the same name.
-	base := strings.TrimSuffix(id, "[1m]")
-	add(base)
-	add(base + "[1m]")
-	// A derived id replaced the provider id entirely, so a desktop session may
-	// still send the hashed name this release no longer publishes.  The window
-	// follows the model, not its name, so the hashed spelling keeps the entry.
-	sum := sha256.Sum256([]byte(base))
-	hashed := "claude-mythos-" + hex.EncodeToString(sum[:])[:6]
-	add(hashed)
-	add(hashed + "[1m]")
-	return aliases
+	if mode == "metadata" && m.ClaudeAlias != "" {
+		return ""
+	}
+	if claudeKeepsID(id) {
+		return ""
+	}
+	return claudeBehavior(m.Window)
+}
+
+func claudeOrdered(models []model) []model {
+	ordered := append([]model(nil), models...)
+	sort.SliceStable(ordered, func(i, j int) bool {
+		left := first(ordered[i].Label, ordered[i].ID)
+		right := first(ordered[j].Label, ordered[j].ID)
+		if !strings.EqualFold(left, right) {
+			return strings.ToLower(left) < strings.ToLower(right)
+		}
+		return ordered[i].ID < ordered[j].ID
+	})
+	return ordered
 }
 
 func claudeProjection(models []model, mode string) (json.RawMessage, map[string]json.RawMessage) {
 	options := make([]object, 0, len(models))
 	windows := make(map[string]json.RawMessage)
-	for _, m := range models {
+	for _, m := range claudeOrdered(models) {
 		id := claudeModelID(m, mode)
 		window, stated := claudeCompactWindow(m.Window)
-		behavior := m.BehavesAs
-		if behavior == "" {
-			behavior = claudeBehavior(window)
+		if mode == "derived" && window >= 1000000 && !strings.HasSuffix(id, "[1m]") {
+			id += "[1m]"
 		}
-		row := object{"model": id, "label": m.Label, "behavesAs": behavior}
-		if m.Description != "" {
-			row["description"] = m.Description
+		behavior := claudeBehaviorFor(m, mode, id)
+		row := object{"model": id}
+		if !claudeKeepsID(id) {
+			if m.Label != "" {
+				row["label"] = m.Label
+			}
+			description := m.Description
+			if description == "" {
+				// Claude Code renders a subtitle for a curated row unless
+				// description is present; the zero-width space keeps the row
+				// reading as its model name, the same spelling Young Router's
+				// picker writes.
+				description = "\u200b"
+			}
+			row["description"] = description
+		}
+		if behavior != "" {
+			row["behavesAs"] = behavior
 		}
 		options = append(options, row)
 		// A model whose provider states no window is written with an empty
@@ -346,21 +360,11 @@ func claudeProjection(models []model, mode string) (json.RawMessage, map[string]
 		} else {
 			windows[id] = rawJSON(object{})
 		}
-		// Claude Desktop pins a session to the id it was created with, and a
-		// session created before this release still runs an older spelling of
-		// the same model.  Claude Code resolves the window of a name it does
-		// not know from that name's own modelPicker row: with no row it falls
-		// back to the 200000 it assumes, and the app's injected
-		// CLAUDE_CODE_MAX_CONTEXT_TOKENS pins it there whatever
-		// modelSettings says.  Measured through the app's own channel
-		// (get_context_usage) with that injection in place, a legacy id read
-		// 200000 and the same id with a behavesAs row read the row's window.
-		// So every id a session may still send is offered a row of its own.
-		if behavior == "" {
-			continue
-		}
-		for _, alias := range historicalAliases(id, mode) {
-			options = append(options, object{"model": alias, "label": alias, "behavesAs": behavior})
+		// The picker names the 1M row with the client's suffix, but a session
+		// runs the suffix-free id.  The number has to be stated under both
+		// spellings or the picker and the session disagree about the window.
+		if base := strings.TrimSuffix(id, "[1m]"); base != id {
+			windows[base] = windows[id]
 		}
 	}
 	return rawJSON(object{"replaceBuiltInOptions": true, "options": options}), windows
@@ -464,20 +468,6 @@ func applyClaude(models []model, loc locations, managed *managedState, mode stri
 		}
 		var projected map[string]json.RawMessage
 		_ = json.Unmarshal(value, &projected)
-		// A session keeps the model id it was created with.  When an earlier
-		// release published the same model under a derived or alias id, every
-		// desktop session built on it still sends that id, and an id with no
-		// entry falls back to the 200000 Claude Code assumes for a name it does
-		// not recognise.  Carry the window across to those ids, including the
-		// "[1m]" spelling the desktop app appends, so an existing session keeps
-		// its window instead of losing it when the published name changes.
-		if window, ok := projected["autoCompactWindow"]; ok && len(window) > 0 && string(window) != "null" {
-			for _, alias := range historicalAliases(id, mode) {
-				if _, exists := existing[alias]; !exists {
-					existing[alias] = rawJSON(object{"autoCompactWindow": window})
-				}
-			}
-		}
 		if window, ok := projected["autoCompactWindow"]; ok && len(window) > 0 && string(window) != "null" {
 			current["autoCompactWindow"] = window
 		} else {
@@ -485,6 +475,24 @@ func applyClaude(models []model, loc locations, managed *managedState, mode stri
 		}
 		existing[id] = rawJSON(current)
 		windows[id] = existing[id]
+	}
+	// A derived id that names no current row is not a route the client can
+	// send any more.  Retire it when it holds nothing but the window this
+	// projection wrote; an entry with another field is the user's and stays.
+	for key, value := range existing {
+		if _, current := windows[key]; current {
+			continue
+		}
+		if !claudeDerivedAlias(key) {
+			continue
+		}
+		entry := make(map[string]json.RawMessage)
+		if json.Unmarshal(value, &entry) != nil || entry == nil {
+			continue
+		}
+		if _, window := entry["autoCompactWindow"]; len(entry) == 0 || (len(entry) == 1 && window) {
+			delete(existing, key)
+		}
 	}
 	settings["modelPicker"] = picker
 	if len(existing) > 0 || settings["modelSettings"] != nil {

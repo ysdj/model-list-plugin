@@ -16,12 +16,22 @@ name Claude Code does not recognise, `rawMaxTokens` is pinned to that injected
 number and no `modelSettings` value overrides it.  The name is only recognised
 when `modelPicker.options` carries a row for it with `behavesAs`.
 
-**Rule.** Every id a session can send needs its own `modelPicker` row with
-`behavesAs`, not just the id this release publishes.  Desktop pins a session to
-the id it was created with, so legacy spellings (the derived `claude-mythos-*`
-aliases and their `[1m]` form) have to be offered as rows too.  `modelSettings`
-then states the exact number; `behavesAs` only decides which tier the client
-uses.
+**Rule.** Write one `modelPicker` row per model, under the id both apps
+address it by: the provider-published `claude_alias` when present (the derived
+`claude-mythos-*` alias or a kept Claude id, plus `[1m]` at 1M), otherwise the
+derived alias/public id.  `modelSettings` states the exact number under the
+picker id and the suffix-free id a session runs.  Do not add a row for every
+spelling a previous release published: that turned thirteen models into
+fifty-six rows and made the plugin's list impossible to reconcile with the
+app's own.  A legacy id may keep its `modelSettings` entry, but a visible
+legacy row is a targeted migration decision, not the default.
+
+**Takeover.** Young Router's "Use Young Router API" switch enables the Claude
+target, sets `claudeAliasMode: "metadata"`, and syncs once.  The canonical
+`/v1/models` then supplies `claude_alias` and `behaves_as`; the plugin must not
+re-derive them.  Generators are marked `type: "image"` by the provider and are
+dropped before projection.  The app must not write `modelPicker` or
+`modelSettings` again while the plugin owns the file.
 
 **How to verify without the GUI.** Drive the CLI over its stream-json channel
 and read the same control response the app reads:

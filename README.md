@@ -6,7 +6,7 @@ The plugin includes executables for macOS (Apple Silicon and Intel) and Windows 
 
 ## Install
 
-In Young Router, open **External settings**, select **Claude**, and choose **Install** beside **Model list plugin**. The card shows installation status and controls for syncing or uninstalling. Enabling the Young Router API offers to install the plugin. On a machine with only Claude Desktop, the card reaches the copy of Claude Code that app installed; no `claude` command on `PATH` is required. Codex manages this plugin from Codex itself (the Codex commands above); Young Router offers no card for it.
+In Young Router, open **External settings**, select **Claude**, and choose **Install** beside **Model list plugin**. The card shows installation status and controls for syncing or uninstalling. Turning on **Use Young Router API** installs the plugin when needed, enables its Claude target, switches it to the provider-published `metadata` projection, and syncs once; the plugin is then the only writer of Claude Code's model list. On a machine with only Claude Desktop, the card reaches the copy of Claude Code that app installed; no `claude` command on `PATH` is required. Codex manages this plugin from Codex itself (the Codex commands above); Young Router offers no card for it.
 
 Alternatively install directly for each agent.
 
@@ -30,10 +30,20 @@ When a listed model has no context window, the plugin looks it up in the same pu
 
 Claude Code resolves a model's window from the picker row that names it: an id
 it does not recognise falls back to 200000, and Claude Desktop pins that
-fallback for the whole session. A session also keeps the id it was created
-with, so the projection offers every spelling of a model — including the
-aliases earlier releases generated — a row of its own, and states the window
-under each of those ids.
+fallback for the whole session. The projection writes **one row per model**,
+under the id both Claude apps address it by: the provider-published
+``claude_alias`` when it states one (Young Router does), otherwise the derived
+alias or the public name Desktop keeps, with the client's ``[1m]`` spelling for
+a route published at 1M. ``modelSettings`` states the window under both the
+picker id and the suffix-free id a session actually sends.
+
+A provider that publishes ``behaves_as`` decides the client behavior tier;
+without it the projection uses the same 200k/1M tiers Young Router uses. Rows
+the client already knows (a real Claude id) keep their own label, effort ladder
+and behavior. Generators are dropped. Older spellings are not duplicated as
+picker rows: that made the list four times longer than the app's own and was
+the reason a takeover could not match the Desktop list. A session still pinned
+to an old id can keep its window entry, but it does not get a visible row.
 
 ## Synchronization and updates
 

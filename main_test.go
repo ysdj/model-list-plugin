@@ -778,9 +778,9 @@ func TestClaudeBehaviorCoversStatedWindow(t *testing.T) {
 		{200000, "claude-sonnet-4-6"},
 		{262144, "claude-opus-4-8"},
 		{500000, "claude-opus-4-8"},
-		{1000000, "claude-opus-4-8"},
-		{1048576, "claude-opus-4-8"},
-		{0, "claude-opus-5-5"},
+		{1000000, "claude-opus-5-5"},
+		{1048576, "claude-opus-5-5"},
+		{0, "claude-sonnet-4-6"},
 	}
 	for _, c := range cases {
 		window, _ := claudeCompactWindow(c.stated)
@@ -796,12 +796,11 @@ func TestClaudeBehaviorCoversStatedWindow(t *testing.T) {
 			continue
 		}
 		behavior := claudeBehavior(window)
-		assumed := 0
-		for _, candidate := range claudeBehaviorWindows {
-			if candidate.model == behavior {
-				assumed = candidate.window
-			}
-		}
+		assumed := map[string]int{
+			"claude-sonnet-4-6": 200000,
+			"claude-opus-4-8":   1000000,
+			"claude-opus-5-5":   1000000,
+		}[behavior]
 		if assumed < window {
 			t.Errorf("behavior %q assumes %d, below the projected %d", behavior, assumed, window)
 		}
@@ -857,17 +856,13 @@ func TestClaudeProjectionWritesEveryOfferedModel(t *testing.T) {
 	}
 }
 
-// TestClaudeProjectionOffersLegacyIdsTheirOwnBehavior reproduces the readout
-// that made this fix necessary: Claude Desktop pins a session to the model id
-// it was created with, and a session created by an older release still runs a
-// hashed alias.  Claude Code resolves a name it does not know from that name's
-// own modelPicker row -- with no row it assumes 200000, and the app's injected
-// CLAUDE_CODE_MAX_CONTEXT_TOKENS holds it there no matter what modelSettings
-// says.  Measured through the app's own get_context_usage channel with that
-// injection in place, "claude-mythos-495a09" read 200000 with no row and
-// 500000 once its row carried behavesAs, so every legacy spelling must be
-// offered a row of its own.
-func TestClaudeProjectionOffersLegacyIdsTheirOwnBehavior(t *testing.T) {
+// TestClaudeProjectionWritesOneRowPerModel guards the picker shape the
+// handoff from Young Router depends on: one visible row per model, not one per
+// legacy spelling.  The old projection offered every historical alias as a row
+// (four rows per model once the "[1m]" and hashed spellings were included),
+// which made the plugin's list impossible to reconcile with the app's own
+// thirteen-row list.
+func TestClaudeProjectionWritesOneRowPerModel(t *testing.T) {
 	models := []model{{ID: "gpt-6.2-sol", Label: "gpt-6.2-sol", Window: 500000}}
 	picker, windows := claudeProjection(models, "derived")
 
@@ -883,17 +878,100 @@ func TestClaudeProjectionOffersLegacyIdsTheirOwnBehavior(t *testing.T) {
 	if err := json.Unmarshal(picker, &parsed); err != nil {
 		t.Fatal(err)
 	}
-	behaviors := make(map[string]string, len(parsed.Options))
-	for _, option := range parsed.Options {
-		behaviors[option.Model] = option.BehavesAs
+	if len(parsed.Options) != 1 {
+		t.Fatalf("expected one row per model, got %d", len(parsed.Options))
 	}
-	for _, id := range []string{legacy, legacy + "[1m]"} {
-		if behaviors[id] == "" {
-			t.Errorf("legacy id %q has no behavesAs row, so its session reads 200K", id)
-		}
+	if parsed.Options[0].Model != legacy || parsed.Options[0].BehavesAs == "" {
+		t.Errorf("row = %+v, want one behaving row for %q", parsed.Options[0], legacy)
 	}
 	if got := string(windows[legacy]); got != `{"autoCompactWindow":500000}` {
-		t.Errorf("legacy window entry = %s", got)
+		t.Errorf("primary window entry = %s", got)
+	}
+}
+
+// TestClaudeProjectionStatesBothSpellingsOfAOneMillionModel covers the id the
+// picker names versus the id a session runs.  The row carries "[1m]", but the
+// session writes the suffix-free id; a number under only one spelling leaves
+// the other on Claude Code's 200K default.
+func TestClaudeProjectionStatesBothSpellingsOfAOneMillionModel(t *testing.T) {
+	models := []model{{ID: "deepseek-v4.1-flash", Label: "deepseek-v4.1-flash", Window: 1000000}}
+	picker, windows := claudeProjection(models, "derived")
+	hash := sha256.Sum256([]byte("deepseek-v4.1-flash"))
+	base := "claude-mythos-" + hex.EncodeToString(hash[:])[:6]
+	for _, id := range []string{base, base + "[1m]"} {
+		if got := string(windows[id]); got != `{"autoCompactWindow":1000000}` {
+			t.Errorf("window under %q = %s", id, got)
+		}
+	}
+	var parsed struct {
+		Options []struct {
+			Model string `json:"model"`
+		} `json:"options"`
+	}
+	if err := json.Unmarshal(picker, &parsed); err != nil {
+		t.Fatal(err)
+	}
+	if len(parsed.Options) != 1 || parsed.Options[0].Model != base+"[1m]" {
+		t.Errorf("picker options = %+v", parsed.Options)
+	}
+}
+
+// TestClaudeProjectionUsesProviderMetadata pins the handoff contract: when the
+// provider states claude_alias and behaves_as, the projection uses them
+// directly instead of re-deriving the Desktop id or the behavior tier.
+func TestClaudeProjectionUsesProviderMetadata(t *testing.T) {
+	models := []model{{
+		ID:          "deepseek-v4.1-flash",
+		Label:       "deepseek-v4.1-flash",
+		ClaudeAlias: "claude-mythos-eb1394[1m]",
+		BehavesAs:   "claude-opus-5-5",
+		Window:      1000000,
+	}}
+	picker, windows := claudeProjection(models, "metadata")
+	var parsed struct {
+		Options []struct {
+			Model       string `json:"model"`
+			Label       string `json:"label"`
+			Description string `json:"description"`
+			BehavesAs   string `json:"behavesAs"`
+		} `json:"options"`
+	}
+	if err := json.Unmarshal(picker, &parsed); err != nil {
+		t.Fatal(err)
+	}
+	if len(parsed.Options) != 1 {
+		t.Fatalf("expected one row, got %+v", parsed.Options)
+	}
+	row := parsed.Options[0]
+	if row.Model != "claude-mythos-eb1394[1m]" || row.Label != "deepseek-v4.1-flash" ||
+		row.BehavesAs != "claude-opus-5-5" || row.Description != "\u200b" {
+		t.Errorf("row = %+v", row)
+	}
+	for _, id := range []string{"claude-mythos-eb1394", "claude-mythos-eb1394[1m]"} {
+		if got := string(windows[id]); got != `{"autoCompactWindow":1000000}` {
+			t.Errorf("window under %q = %s", id, got)
+		}
+	}
+}
+
+// TestClaudeProjectionLeavesRealClaudeRowsToTheClient keeps a row whose id the
+// client already knows free of this projection's label, subtitle and behavior.
+// The app's own picker writes those rows as just their model id; inventing a
+// label or a substitute would hide the catalogue's own name and ladder.
+func TestClaudeProjectionLeavesRealClaudeRowsToTheClient(t *testing.T) {
+	models := []model{{ID: "claude-fable-5-2", Label: "claude-fable-5-2", Window: 1000000}}
+	picker, _ := claudeProjection(models, "raw")
+	var parsed struct {
+		Options []map[string]any `json:"options"`
+	}
+	if err := json.Unmarshal(picker, &parsed); err != nil {
+		t.Fatal(err)
+	}
+	if len(parsed.Options) != 1 {
+		t.Fatalf("expected one row, got %+v", parsed.Options)
+	}
+	if len(parsed.Options[0]) != 1 || parsed.Options[0]["model"] != "claude-fable-5-2" {
+		t.Errorf("row = %+v, want only its model id", parsed.Options[0])
 	}
 }
 
