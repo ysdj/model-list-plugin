@@ -19,7 +19,7 @@ when `modelPicker.options` carries a row for it with `behavesAs`.
 **Rule.** Write one `modelPicker` row per model, under the id both apps
 address it by: the provider-published `claude_alias` when present (the derived
 `claude-mythos-*` alias or a kept Claude id, plus `[1m]` at 1M), otherwise the
-derived alias/public id.  `modelSettings` states the exact number under the
+derived alias.  `modelSettings` states the exact number under the
 picker id and the suffix-free id a session runs.  Do not add a row for every
 spelling a previous release published: that turned thirteen models into
 fifty-six rows and made the plugin's list impossible to reconcile with the

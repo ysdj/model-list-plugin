@@ -33,8 +33,7 @@ it does not recognise falls back to 200000, and Claude Desktop pins that
 fallback for the whole session. The projection writes **one row per model**,
 under the id both Claude apps address it by: the provider-published
 ``claude_alias`` when it states one (Young Router does), otherwise the derived
-alias or the public name Desktop keeps, with the client's ``[1m]`` spelling for
-a route published at 1M. ``modelSettings`` states the window under both the
+alias, with the client's ``[1m]`` spelling for a route published at 1M. ``modelSettings`` states the window under both the
 picker id and the suffix-free id a session actually sends.
 
 A provider that publishes ``behaves_as`` decides the client behavior tier;
