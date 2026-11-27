@@ -27,11 +27,11 @@ app's own.  A legacy id may keep its `modelSettings` entry, but a visible
 legacy row is a targeted migration decision, not the default.
 
 **Takeover.** Young Router's "Use Young Router API" switch enables the Claude
-target, sets `claudeAliasMode: "metadata"`, and syncs once.  The canonical
-`/v1/models` then supplies `claude_alias` and `behaves_as`; the plugin must not
-re-derive them.  Generators are marked `type: "image"` by the provider and are
-dropped before projection.  The app must not write `modelPicker` or
-`modelSettings` again while the plugin owns the file.
+target and syncs once.  The canonical `/v1/models` supplies `claude_alias` and
+`behaves_as`; the plugin must not re-derive them.  Generators are marked
+`type: "image"` by the provider and are dropped before projection.  The app
+must not write `modelPicker` or `modelSettings` again while the plugin owns
+the file.
 
 **How to verify without the GUI.** Drive the CLI over its stream-json channel
 and read the same control response the app reads:

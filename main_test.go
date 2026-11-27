@@ -194,7 +194,7 @@ func TestCodexPointerIsTopLevelAndRestores(t *testing.T) {
 
 func TestRawModelIDAndWindows(t *testing.T) {
 	models := []model{{ID: "provider/model-a", Label: "Model A", Window: 512000, Efforts: []string{"low", "high"}}, {ID: "other", Label: "Other", Window: 128000}}
-	picker, windows := claudeProjection(models, "raw")
+	picker, windows := claudeProjection(models)
 	var result struct {
 		Options []struct {
 			Model     string `json:"model"`
@@ -204,11 +204,12 @@ func TestRawModelIDAndWindows(t *testing.T) {
 	if err := json.Unmarshal(picker, &result); err != nil {
 		t.Fatal(err)
 	}
-	if result.Options[0].Model != "provider/model-a" || result.Options[0].BehavesAs != "claude-opus-4-8" {
+	windowedID := claudeModelID(models[0])
+	if result.Options[0].Model != windowedID || result.Options[0].BehavesAs != "claude-opus-4-8" {
 		t.Fatalf("incorrect picker: %s", picker)
 	}
-	if string(windows["provider/model-a"]) != `{"autoCompactWindow":512000}` {
-		t.Fatalf("incorrect window: %s", windows["provider/model-a"])
+	if string(windows[windowedID]) != `{"autoCompactWindow":512000}` {
+		t.Fatalf("incorrect window: %s", windows[windowedID])
 	}
 	catalog := codexCatalog(models, []object{{"slug": "native", "base_instructions": "native", "shell_type": "unified_exec"}})
 	entries := catalog["models"].([]object)
@@ -311,14 +312,14 @@ func TestSyncErrorIsAttributedToItsHost(t *testing.T) {
 	}
 	cfg := defaultConfig()
 	cfg.Enabled = true
-	saved := state{LastErrorByHost: map[string]string{"codex": "older codex failure"}, LastError: "older codex failure"}
+	saved := state{LastErrorByHost: map[string]string{"codex": "older codex failure"}}
 	if _, err := syncModels(cfg, loc, &saved, "claude"); err == nil {
 		t.Fatal("expected the unreachable Claude gateway to fail")
 	}
 	if saved.LastErrorByHost["claude"] == "" {
 		t.Fatalf("Claude's failure was not recorded: %+v", saved)
 	}
-	if saved.LastErrorByHost["codex"] != "older codex failure" || saved.LastError != saved.LastErrorByHost["claude"] {
+	if saved.LastErrorByHost["codex"] != "older codex failure" {
 		t.Fatalf("the failure leaked across hosts: %+v", saved)
 	}
 
@@ -335,7 +336,7 @@ func TestSyncErrorIsAttributedToItsHost(t *testing.T) {
 	if _, exists := saved.LastErrorByHost["claude"]; exists {
 		t.Fatalf("Claude's error survived its success: %+v", saved)
 	}
-	if saved.LastErrorByHost["codex"] != "older codex failure" || saved.LastError != "older codex failure" {
+	if saved.LastErrorByHost["codex"] != "older codex failure" {
 		t.Fatalf("Codex's error was cleared by Claude's sync: %+v", saved)
 	}
 }
@@ -345,7 +346,6 @@ func TestStatusPublishesEachHostsError(t *testing.T) {
 	cfg.Enabled = true
 	loc := testLocations(t)
 	saved := state{
-		LastError:       "codex failed",
 		LastErrorByHost: map[string]string{"codex": "codex failed"},
 	}
 	out := status(cfg, loc, saved, "claude")
@@ -817,7 +817,7 @@ func TestClaudeProjectionWritesEveryOfferedModel(t *testing.T) {
 		{ID: "unwindowed", Label: "Unwindowed"},
 		{ID: "tiny", Label: "Tiny", Window: 4096},
 	}
-	picker, windows := claudeProjection(models, "raw")
+	picker, windows := claudeProjection(models)
 
 	var parsed struct {
 		Options []struct {
@@ -832,7 +832,10 @@ func TestClaudeProjectionWritesEveryOfferedModel(t *testing.T) {
 	for _, option := range parsed.Options {
 		seen[option.Model] = option.BehavesAs
 	}
-	for _, id := range []string{"windowed", "unwindowed", "tiny"} {
+	windowedID := claudeModelID(models[0])
+	unwindowedID := claudeModelID(models[1])
+	tinyID := claudeModelID(models[2])
+	for _, id := range []string{windowedID, unwindowedID, tinyID} {
 		if _, ok := seen[id]; !ok {
 			t.Errorf("model %q was not offered", id)
 		}
@@ -840,17 +843,17 @@ func TestClaudeProjectionWritesEveryOfferedModel(t *testing.T) {
 	if len(windows) != len(models) {
 		t.Fatalf("expected an entry per model, got %d", len(windows))
 	}
-	if got := string(windows["windowed"]); got != `{"autoCompactWindow":500000}` {
+	if got := string(windows[windowedID]); got != `{"autoCompactWindow":500000}` {
 		t.Errorf("windowed entry = %s", got)
 	}
-	if got := string(windows["unwindowed"]); got != `{}` {
+	if got := string(windows[unwindowedID]); got != `{}` {
 		t.Errorf("a model without a stated window should carry no window, got %s", got)
 	}
-	if got := string(windows["tiny"]); got != `{"autoCompactWindow":100000}` {
+	if got := string(windows[tinyID]); got != `{"autoCompactWindow":100000}` {
 		t.Errorf("a window below the floor should clamp up, got %s", got)
 	}
 	for _, option := range parsed.Options {
-		if option.Model == "windowed" && option.BehavesAs == "claude-sonnet-4-6" {
+		if option.Model == windowedID && option.BehavesAs == "claude-sonnet-4-6" {
 			t.Errorf("a %d-token model must not borrow the 200K behavior", 500000)
 		}
 	}
@@ -864,7 +867,7 @@ func TestClaudeProjectionWritesEveryOfferedModel(t *testing.T) {
 // thirteen-row list.
 func TestClaudeProjectionWritesOneRowPerModel(t *testing.T) {
 	models := []model{{ID: "gpt-6.2-sol", Label: "gpt-6.2-sol", Window: 500000}}
-	picker, windows := claudeProjection(models, "derived")
+	picker, windows := claudeProjection(models)
 
 	hash := sha256.Sum256([]byte("gpt-6.2-sol"))
 	legacy := "claude-mythos-" + hex.EncodeToString(hash[:])[:6]
@@ -895,7 +898,7 @@ func TestClaudeProjectionWritesOneRowPerModel(t *testing.T) {
 // the other on Claude Code's 200K default.
 func TestClaudeProjectionStatesBothSpellingsOfAOneMillionModel(t *testing.T) {
 	models := []model{{ID: "deepseek-v4.1-flash", Label: "deepseek-v4.1-flash", Window: 1000000}}
-	picker, windows := claudeProjection(models, "derived")
+	picker, windows := claudeProjection(models)
 	hash := sha256.Sum256([]byte("deepseek-v4.1-flash"))
 	base := "claude-mythos-" + hex.EncodeToString(hash[:])[:6]
 	for _, id := range []string{base, base + "[1m]"} {
@@ -927,7 +930,7 @@ func TestClaudeProjectionUsesProviderMetadata(t *testing.T) {
 		BehavesAs:   "claude-opus-5-5",
 		Window:      1000000,
 	}}
-	picker, windows := claudeProjection(models, "metadata")
+	picker, windows := claudeProjection(models)
 	var parsed struct {
 		Options []struct {
 			Model       string `json:"model"`
@@ -959,8 +962,8 @@ func TestClaudeProjectionUsesProviderMetadata(t *testing.T) {
 // The app's own picker writes those rows as just their model id; inventing a
 // label or a substitute would hide the catalogue's own name and ladder.
 func TestClaudeProjectionLeavesRealClaudeRowsToTheClient(t *testing.T) {
-	models := []model{{ID: "claude-fable-5-2", Label: "claude-fable-5-2", Window: 1000000}}
-	picker, _ := claudeProjection(models, "raw")
+	models := []model{{ID: "claude-fable-5-2", Label: "claude-fable-5-2", ClaudeAlias: "claude-fable-5-2", Window: 1000000}}
+	picker, _ := claudeProjection(models)
 	var parsed struct {
 		Options []map[string]any `json:"options"`
 	}
@@ -1017,7 +1020,7 @@ func TestApplyClaudeRetiresUnusedDerivedWindows(t *testing.T) {
 		t.Fatal(err)
 	}
 	managed := managedState{}
-	if err := applyClaude([]model{{ID: "current", Label: "current", Window: 500000}}, loc, &managed, "derived"); err != nil {
+	if err := applyClaude([]model{{ID: "current", Label: "current", Window: 500000}}, loc, &managed); err != nil {
 		t.Fatal(err)
 	}
 	var settings map[string]json.RawMessage

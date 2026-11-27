@@ -6,7 +6,7 @@ The plugin includes executables for macOS (Apple Silicon and Intel) and Windows 
 
 ## Install
 
-In Young Router, open **External settings**, select **Claude**, and choose **Install** beside **Model list plugin**. The card shows installation status and controls for syncing or uninstalling. Turning on **Use Young Router API** installs the plugin when needed, enables its Claude target, switches it to the provider-published `metadata` projection, and syncs once; the plugin is then the only writer of Claude Code's model list. On a machine with only Claude Desktop, the card reaches the copy of Claude Code that app installed; no `claude` command on `PATH` is required. Codex manages this plugin from Codex itself (the Codex commands above); Young Router offers no card for it.
+In Young Router, open **External settings**, select **Claude**, and choose **Install** beside **Model list plugin**. The card shows installation status and controls for syncing or uninstalling. Turning on **Use Young Router API** installs the plugin when needed, enables its Claude target, and syncs once using the provider-published projection; the plugin is then the only writer of Claude Code's model list. On a machine with only Claude Desktop, the card reaches the copy of Claude Code that app installed; no `claude` command on `PATH` is required. Codex manages this plugin from Codex itself (the Codex commands above); Young Router offers no card for it.
 
 Alternatively install directly for each agent.
 

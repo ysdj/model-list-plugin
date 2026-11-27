@@ -14,7 +14,7 @@ import (
 	"github.com/pelletier/go-toml/v2"
 )
 
-const version = "0.3.0"
+const version = "0.3.1"
 const pluginName = "model-list-plugin"
 
 type targets struct {
@@ -26,12 +26,11 @@ type config struct {
 	Enabled             bool            `json:"enabled"`
 	Targets             targets         `json:"targets"`
 	InitializedTargets  map[string]bool `json:"initializedTargets"`
-	ClaudeAliasMode     string          `json:"claudeAliasMode"`
 	SyncIntervalSeconds int             `json:"syncIntervalSeconds"`
 }
 
 func defaultConfig() config {
-	return config{Targets: targets{true, true}, InitializedTargets: map[string]bool{}, ClaudeAliasMode: "raw", SyncIntervalSeconds: 60}
+	return config{Targets: targets{true, true}, InitializedTargets: map[string]bool{}, SyncIntervalSeconds: 60}
 }
 
 type codexState struct {
@@ -57,11 +56,9 @@ type state struct {
 	LastSyncAtByTarget      map[string]string `json:"lastSyncAtByTarget,omitempty"`
 	LastUpdateCheckAtByHost map[string]string `json:"lastUpdateCheckAtByHost,omitempty"`
 	LastUpdateErrorByHost   map[string]string `json:"lastUpdateErrorByHost,omitempty"`
-	LastError               string            `json:"lastError,omitempty"`
-	// LastErrorByHost is the synchronization error of one host.  LastError is
-	// the same fact for a consumer that predates this map; a host's failure
-	// must not be printed under the other host's card, and either error clears
-	// only when that host's own sync lands.
+	// LastErrorByHost is the synchronization error of one host.  A host's
+	// failure must not be printed under the other host's card, and an error
+	// clears only when that host's own sync lands.
 	LastErrorByHost map[string]string `json:"lastErrorByHost,omitempty"`
 	ModelIDs        []string          `json:"modelIds,omitempty"`
 }
@@ -152,9 +149,6 @@ func loadConfig(path string) (config, error) {
 	}
 	if value.SyncIntervalSeconds < 0 {
 		return value, errors.New("syncIntervalSeconds must be non-negative")
-	}
-	if value.ClaudeAliasMode == "" {
-		value.ClaudeAliasMode = "raw"
 	}
 	return value, nil
 }

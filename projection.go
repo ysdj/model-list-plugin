@@ -258,17 +258,15 @@ func claudeCompactWindow(window int) (int, bool) {
 	return max(claudeWindowFloor, min(window, claudeWindowCeiling)), true
 }
 
-// claudeModelID is the name a model is published under.
-func claudeModelID(raw model, mode string) string {
-	id := raw.ID
-	if mode == "metadata" && raw.ClaudeAlias != "" {
-		id = raw.ClaudeAlias
+// claudeModelID is the name a model is published under.  A provider that
+// states claude_alias owns the spelling; every other route is derived from its
+// public id, so there is one id space and no per-provider mode to drift.
+func claudeModelID(raw model) string {
+	if raw.ClaudeAlias != "" {
+		return raw.ClaudeAlias
 	}
-	if mode == "derived" {
-		sum := sha256.Sum256([]byte(id))
-		id = "claude-mythos-" + hex.EncodeToString(sum[:])[:6]
-	}
-	return id
+	sum := sha256.Sum256([]byte(raw.ID))
+	return "claude-mythos-" + hex.EncodeToString(sum[:])[:6]
 }
 
 var claudeDerivedPattern = regexp.MustCompile(`^(?:claude-mythos-|claude-fable-)[0-9a-f]{6}$`)
@@ -292,15 +290,11 @@ func claudeDerivedAlias(key string) bool {
 }
 
 // claudeBehaviorFor chooses the behavior a row borrows.  A provider that
-// states behaves_as is authoritative.  In metadata mode an alias without a
-// behavior is a statement that the client already knows the id, so no
-// substitute is invented; outside metadata mode the window decides.
-func claudeBehaviorFor(m model, mode, id string) string {
+// states behaves_as is authoritative.  An id the client already knows keeps
+// its own behavior; every other route borrows the tier for its window.
+func claudeBehaviorFor(m model, id string) string {
 	if m.BehavesAs != "" {
 		return m.BehavesAs
-	}
-	if mode == "metadata" && m.ClaudeAlias != "" {
-		return ""
 	}
 	if claudeKeepsID(id) {
 		return ""
@@ -321,16 +315,16 @@ func claudeOrdered(models []model) []model {
 	return ordered
 }
 
-func claudeProjection(models []model, mode string) (json.RawMessage, map[string]json.RawMessage) {
+func claudeProjection(models []model) (json.RawMessage, map[string]json.RawMessage) {
 	options := make([]object, 0, len(models))
 	windows := make(map[string]json.RawMessage)
 	for _, m := range claudeOrdered(models) {
-		id := claudeModelID(m, mode)
+		id := claudeModelID(m)
 		window, stated := claudeCompactWindow(m.Window)
-		if mode == "derived" && window >= 1000000 && !strings.HasSuffix(id, "[1m]") {
+		if m.ClaudeAlias == "" && window >= 1000000 && !strings.HasSuffix(id, "[1m]") {
 			id += "[1m]"
 		}
-		behavior := claudeBehaviorFor(m, mode, id)
+		behavior := claudeBehaviorFor(m, id)
 		row := object{"model": id}
 		if !claudeKeepsID(id) {
 			if m.Label != "" {
@@ -424,7 +418,7 @@ func restoreCompact(existing, original, last json.RawMessage) (json.RawMessage, 
 	return rawJSON(current), true, nil
 }
 
-func applyClaude(models []model, loc locations, managed *managedState, mode string) error {
+func applyClaude(models []model, loc locations, managed *managedState) error {
 	settings, exists, err := readSettings(loc.ClaudeSettings)
 	if err != nil {
 		return err
@@ -444,7 +438,7 @@ func applyClaude(models []model, loc locations, managed *managedState, mode stri
 	if err != nil {
 		return err
 	}
-	picker, windows := claudeProjection(models, mode)
+	picker, windows := claudeProjection(models)
 	for _, id := range managed.ClaudeAliases {
 		if _, still := windows[id]; still {
 			continue
