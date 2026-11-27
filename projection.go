@@ -282,13 +282,6 @@ func claudeKeepsID(id string) bool {
 	return strings.HasPrefix(text, "claude-") && !claudeDerivedPattern.MatchString(text)
 }
 
-// claudeDerivedAlias reports whether a modelSettings key is one of the derived
-// spellings this plugin may have written.  A key under a public name, or one a
-// person typed, is never retired here.
-func claudeDerivedAlias(key string) bool {
-	return claudeDerivedPattern.MatchString(strings.ToLower(strings.TrimSuffix(key, "[1m]")))
-}
-
 // claudeBehaviorFor chooses the behavior a row borrows.  A provider that
 // states behaves_as is authoritative.  An id the client already knows keeps
 // its own behavior; every other route borrows the tier for its window.
@@ -469,24 +462,6 @@ func applyClaude(models []model, loc locations, managed *managedState) error {
 		}
 		existing[id] = rawJSON(current)
 		windows[id] = existing[id]
-	}
-	// A derived id that names no current row is not a route the client can
-	// send any more.  Retire it when it holds nothing but the window this
-	// projection wrote; an entry with another field is the user's and stays.
-	for key, value := range existing {
-		if _, current := windows[key]; current {
-			continue
-		}
-		if !claudeDerivedAlias(key) {
-			continue
-		}
-		entry := make(map[string]json.RawMessage)
-		if json.Unmarshal(value, &entry) != nil || entry == nil {
-			continue
-		}
-		if _, window := entry["autoCompactWindow"]; len(entry) == 0 || (len(entry) == 1 && window) {
-			delete(existing, key)
-		}
 	}
 	settings["modelPicker"] = picker
 	if len(existing) > 0 || settings["modelSettings"] != nil {

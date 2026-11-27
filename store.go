@@ -14,7 +14,7 @@ import (
 	"github.com/pelletier/go-toml/v2"
 )
 
-const version = "0.3.1"
+const version = "0.3.2"
 const pluginName = "model-list-plugin"
 
 type targets struct {

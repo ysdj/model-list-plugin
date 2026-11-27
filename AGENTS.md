@@ -23,8 +23,8 @@ derived alias.  `modelSettings` states the exact number under the
 picker id and the suffix-free id a session runs.  Do not add a row for every
 spelling a previous release published: that turned thirteen models into
 fifty-six rows and made the plugin's list impossible to reconcile with the
-app's own.  A legacy id may keep its `modelSettings` entry, but a visible
-legacy row is a targeted migration decision, not the default.
+app's own.  An older id keeps its `modelSettings` entry; the plugin does not
+retire it or add a visible row for it.
 
 **Takeover.** Young Router's "Use Young Router API" switch enables the Claude
 target and syncs once.  The canonical `/v1/models` supplies `claude_alias` and

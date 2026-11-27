@@ -861,16 +861,15 @@ func TestClaudeProjectionWritesEveryOfferedModel(t *testing.T) {
 
 // TestClaudeProjectionWritesOneRowPerModel guards the picker shape the
 // handoff from Young Router depends on: one visible row per model, not one per
-// legacy spelling.  The old projection offered every historical alias as a row
-// (four rows per model once the "[1m]" and hashed spellings were included),
-// which made the plugin's list impossible to reconcile with the app's own
-// thirteen-row list.
+// spelling.  A projection that offered every historical alias as a row (four
+// rows per model once the "[1m]" and hashed spellings were included) made the
+// plugin's list impossible to reconcile with the app's own thirteen-row list.
 func TestClaudeProjectionWritesOneRowPerModel(t *testing.T) {
 	models := []model{{ID: "gpt-6.2-sol", Label: "gpt-6.2-sol", Window: 500000}}
 	picker, windows := claudeProjection(models)
 
 	hash := sha256.Sum256([]byte("gpt-6.2-sol"))
-	legacy := "claude-mythos-" + hex.EncodeToString(hash[:])[:6]
+	derived := "claude-mythos-" + hex.EncodeToString(hash[:])[:6]
 
 	var parsed struct {
 		Options []struct {
@@ -884,10 +883,10 @@ func TestClaudeProjectionWritesOneRowPerModel(t *testing.T) {
 	if len(parsed.Options) != 1 {
 		t.Fatalf("expected one row per model, got %d", len(parsed.Options))
 	}
-	if parsed.Options[0].Model != legacy || parsed.Options[0].BehavesAs == "" {
-		t.Errorf("row = %+v, want one behaving row for %q", parsed.Options[0], legacy)
+	if parsed.Options[0].Model != derived || parsed.Options[0].BehavesAs == "" {
+		t.Errorf("row = %+v, want one behaving row for %q", parsed.Options[0], derived)
 	}
-	if got := string(windows[legacy]); got != `{"autoCompactWindow":500000}` {
+	if got := string(windows[derived]); got != `{"autoCompactWindow":500000}` {
 		t.Errorf("primary window entry = %s", got)
 	}
 }
@@ -1000,44 +999,5 @@ func TestNormalizeDerivesWindowFromOutputCap(t *testing.T) {
 	}
 	if byID["none"] != 0 {
 		t.Errorf("a model with no numbers should stay at 0, got %d", byID["none"])
-	}
-}
-
-// TestApplyClaudeRetiresUnusedDerivedWindows guards the cleanup that turns an
-// older four-rows-per-model projection back into the current list.  A derived
-// id no current route names cannot be resolved by the client, so a window
-// under it is dead weight; an entry with any other field belongs to the user.
-func TestApplyClaudeRetiresUnusedDerivedWindows(t *testing.T) {
-	loc := testLocations(t)
-	stale := "claude-mythos-abcdef"
-	if err := writeJSON(loc.ClaudeSettings, map[string]any{
-		"modelSettings": map[string]any{
-			stale:                      map[string]any{"autoCompactWindow": 200000},
-			"claude-mythos-abcdef[1m]": map[string]any{"autoCompactWindow": 200000},
-			"user-entry":               map[string]any{"autoCompactWindow": 100000, "other": "keep"},
-		},
-	}); err != nil {
-		t.Fatal(err)
-	}
-	managed := managedState{}
-	if err := applyClaude([]model{{ID: "current", Label: "current", Window: 500000}}, loc, &managed); err != nil {
-		t.Fatal(err)
-	}
-	var settings map[string]json.RawMessage
-	if err := readJSON(loc.ClaudeSettings, &settings); err != nil {
-		t.Fatal(err)
-	}
-	var windows map[string]json.RawMessage
-	if err := json.Unmarshal(settings["modelSettings"], &windows); err != nil {
-		t.Fatal(err)
-	}
-	if _, ok := windows[stale]; ok {
-		t.Errorf("unused derived window %q survived", stale)
-	}
-	if _, ok := windows[stale+"[1m]"]; ok {
-		t.Errorf("unused derived window %q survived", stale+"[1m]")
-	}
-	if _, ok := windows["user-entry"]; !ok {
-		t.Errorf("a user's modelSettings entry was removed")
 	}
 }
