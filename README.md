@@ -6,7 +6,7 @@ The plugin includes executables for macOS (Apple Silicon and Intel) and Windows 
 
 ## Install
 
-In Young Router, open **External settings**, select Codex or Claude, and choose **Install** beside **Model list plugin**. The card shows installation status and controls for syncing or uninstalling. Enabling the Young Router API offers to install the plugin.
+In Young Router, open **External settings**, select **Claude**, and choose **Install** beside **Model list plugin**. The card shows installation status and controls for syncing or uninstalling. Enabling the Young Router API offers to install the plugin. On a machine with only Claude Desktop, the card reaches the copy of Claude Code that app installed; no `claude` command on `PATH` is required. Codex manages this plugin from Codex itself (the Codex commands above); Young Router offers no card for it.
 
 Alternatively install directly for each agent.
 
@@ -39,7 +39,7 @@ under each of those ids.
 
 Hooks run on session start and prompt submission, with a default minimum interval of 60 seconds per agent. Changes are fetched on a later hook invocation. The host may require a new session to reload a changed catalog or plugin version.
 
-The plugin asks the host plugin manager to check for and install updates once per day while hooks run, including when model synchronization is paused. If automatic updates were turned off in v0.2.0, update once through the host's plugin manager to resume updates. A failed model fetch keeps the previous projection. Disabling synchronization restores the previous Codex catalog pointer or Claude picker settings and preserves unrelated edits.
+The plugin asks the host plugin manager to check for and install updates once per day while hooks run, including when model synchronization is paused. If automatic updates were turned off in v0.2.0, update once through the host's plugin manager to resume updates. A failed model fetch keeps the previous projection and records the error against that client only. Disabling synchronization restores the previous Codex catalog pointer or Claude picker settings and preserves unrelated edits.
 
 ## Development
 

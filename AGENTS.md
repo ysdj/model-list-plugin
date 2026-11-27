@@ -44,6 +44,10 @@ is a different number and did not track this fix; do not use it as evidence.
   cleanup.  Start the app with
   `powershell -NoProfile -Command "Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{CommandLine='\"<app path>\"'}"`.
 - `CloseMainWindow()` does not exit it; `taskkill //IM claude.exe //F` does.
+- The Claude hooks run `scripts/run.sh` through `sh`; a native Windows session
+  does not put that on `PATH`, so each hook also states `commandWindows` that
+  runs the shipped `.exe`.  Keep both variants in step when a hook argument
+  changes.
 - Mouse clicks issued through the accessibility tooling in this setup return
   `POLICY_DENIED`.  Clicking works through `SetCursorPos` + `mouse_event` from
   PowerShell, but the coordinates must be the ones UIA reports in physical

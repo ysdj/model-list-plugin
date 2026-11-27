@@ -92,7 +92,7 @@ func syncModels(cfg config, loc locations, saved *state, host string) (int, erro
 			}
 		}
 		if err != nil {
-			saved.LastError = err.Error()
+			setLastError(saved, target.name, err.Error())
 			if saveErr := writeJSON(loc.State, saved); saveErr != nil {
 				return 0, errors.Join(err, saveErr)
 			}
@@ -107,6 +107,13 @@ func syncModels(cfg config, loc locations, saved *state, host string) (int, erro
 	if err := transaction(loc, func() error {
 		doCodex := cfg.Targets.Codex && (host == "" || host == "codex")
 		doClaude := cfg.Targets.Claude && (host == "" || host == "claude")
+		synced := make([]string, 0, 2)
+		if doCodex {
+			synced = append(synced, "codex")
+		}
+		if doClaude {
+			synced = append(synced, "claude")
+		}
 		if doCodex {
 			if err := applyCodex(modelsByHost["codex"], loc, &saved.Managed); err != nil {
 				return err
@@ -127,7 +134,8 @@ func syncModels(cfg config, loc locations, saved *state, host string) (int, erro
 		if doClaude {
 			saved.LastSyncAtByTarget["claude"] = now
 		}
-		saved.LastSyncAt, saved.Version, saved.LastError = now, version, ""
+		saved.LastSyncAt, saved.Version = now, version
+		clearLastError(saved, synced...)
 		saved.ModelIDs = make([]string, 0, len(models))
 		for _, m := range models {
 			saved.ModelIDs = append(saved.ModelIDs, m.ID)
@@ -136,13 +144,48 @@ func syncModels(cfg config, loc locations, saved *state, host string) (int, erro
 	}); err != nil {
 		old, readErr := loadState(loc.State)
 		if readErr == nil {
-			old.LastError = err.Error()
+			if host != "" {
+				setLastError(&old, host, err.Error())
+			} else {
+				for _, name := range []string{"codex", "claude"} {
+					if (name == "codex" && cfg.Targets.Codex) || (name == "claude" && cfg.Targets.Claude) {
+						setLastError(&old, name, err.Error())
+					}
+				}
+			}
 			_ = writeJSON(loc.State, old)
 			*saved = old
 		}
 		return 0, err
 	}
 	return len(models), nil
+}
+
+// setLastError records one host's synchronization failure.  The global field
+// stays for a consumer that predates the map.
+func setLastError(saved *state, host, message string) {
+	if saved.LastErrorByHost == nil {
+		saved.LastErrorByHost = map[string]string{}
+	}
+	saved.LastErrorByHost[host] = message
+	saved.LastError = message
+}
+
+// clearLastError forgets the named hosts' failures, and republishes another
+// host's remaining failure in the legacy global field.  A successful Claude
+// sync must neither show nor erase a Codex failure.
+func clearLastError(saved *state, hosts ...string) {
+	for _, host := range hosts {
+		delete(saved.LastErrorByHost, host)
+	}
+	if len(saved.LastErrorByHost) == 0 {
+		saved.LastError = ""
+		return
+	}
+	for _, message := range saved.LastErrorByHost {
+		saved.LastError = message
+		return
+	}
 }
 
 func disable(cfg config, loc locations, saved *state) error {
@@ -156,6 +199,7 @@ func disable(cfg config, loc locations, saved *state) error {
 		cfg.Enabled = false
 		cfg.InitializedTargets = map[string]bool{"codex": true, "claude": true}
 		saved.LastError = ""
+		saved.LastErrorByHost = nil
 		if err := writeJSON(loc.State, saved); err != nil {
 			return err
 		}
@@ -190,7 +234,7 @@ func status(cfg config, loc locations, saved state, host string) object {
 	return object{"version": version, "enabled": cfg.Enabled, "targets": cfg.Targets,
 		"syncIntervalSeconds": cfg.SyncIntervalSeconds,
 		"sources":             sources,
-		"lastSyncAt":          saved.LastSyncAt, "lastSyncAtByTarget": saved.LastSyncAtByTarget, "lastError": saved.LastError, "modelCount": len(saved.ModelIDs), "modelIds": saved.ModelIDs,
+		"lastSyncAt":          saved.LastSyncAt, "lastSyncAtByTarget": saved.LastSyncAtByTarget, "lastError": saved.LastError, "lastErrorByHost": saved.LastErrorByHost, "modelCount": len(saved.ModelIDs), "modelIds": saved.ModelIDs,
 		"lastUpdateCheckAtByHost": saved.LastUpdateCheckAtByHost, "lastUpdateErrorByHost": saved.LastUpdateErrorByHost,
 		"paths": object{"config": loc.Config, "dataRoot": loc.Data, "codexCatalog": loc.CodexCatalog, "codexConfig": loc.CodexConfig, "claudeSettings": loc.ClaudeSettings}}
 }
@@ -592,6 +636,7 @@ func run(args []string) error {
 					cfg.Targets.Claude = false
 				}
 				cfg.Enabled = cfg.Targets.Codex || cfg.Targets.Claude
+				clearLastError(&saved, host)
 				if err := writeJSON(loc.State, saved); err != nil {
 					return err
 				}

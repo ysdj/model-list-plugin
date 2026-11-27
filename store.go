@@ -14,7 +14,7 @@ import (
 	"github.com/pelletier/go-toml/v2"
 )
 
-const version = "0.2.9"
+const version = "0.2.10"
 const pluginName = "model-list-plugin"
 
 type targets struct {
@@ -58,7 +58,12 @@ type state struct {
 	LastUpdateCheckAtByHost map[string]string `json:"lastUpdateCheckAtByHost,omitempty"`
 	LastUpdateErrorByHost   map[string]string `json:"lastUpdateErrorByHost,omitempty"`
 	LastError               string            `json:"lastError,omitempty"`
-	ModelIDs                []string          `json:"modelIds,omitempty"`
+	// LastErrorByHost is the synchronization error of one host.  LastError is
+	// the same fact for a consumer that predates this map; a host's failure
+	// must not be printed under the other host's card, and either error clears
+	// only when that host's own sync lands.
+	LastErrorByHost map[string]string `json:"lastErrorByHost,omitempty"`
+	ModelIDs        []string          `json:"modelIds,omitempty"`
 }
 
 type locations struct {

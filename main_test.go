@@ -292,6 +292,69 @@ func TestSyncRollsBackOnInvalidClaudeSettings(t *testing.T) {
 	}
 }
 
+func TestSyncErrorIsAttributedToItsHost(t *testing.T) {
+	ok := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"data":[{"id":"example","context_window":128000}]}`))
+	}))
+	defer ok.Close()
+	loc := testLocations(t)
+	if err := writeFile(loc.CodexConfig, []byte("model_provider = 'test'\n[model_providers.test]\nbase_url = '"+ok.URL+"'\n")); err != nil {
+		t.Fatal(err)
+	}
+	bad := httptest.NewServer(http.NotFoundHandler())
+	badURL := bad.URL
+	bad.Close()
+	if err := writeJSON(loc.ClaudeSettings, map[string]any{"env": map[string]string{
+		"ANTHROPIC_BASE_URL": badURL, "ANTHROPIC_AUTH_TOKEN": "test-gateway-key",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := defaultConfig()
+	cfg.Enabled = true
+	saved := state{LastErrorByHost: map[string]string{"codex": "older codex failure"}, LastError: "older codex failure"}
+	if _, err := syncModels(cfg, loc, &saved, "claude"); err == nil {
+		t.Fatal("expected the unreachable Claude gateway to fail")
+	}
+	if saved.LastErrorByHost["claude"] == "" {
+		t.Fatalf("Claude's failure was not recorded: %+v", saved)
+	}
+	if saved.LastErrorByHost["codex"] != "older codex failure" || saved.LastError != saved.LastErrorByHost["claude"] {
+		t.Fatalf("the failure leaked across hosts: %+v", saved)
+	}
+
+	// The next successful Claude sync clears only Claude's error; Codex's
+	// remains a fact about that host until Codex syncs.
+	if err := writeJSON(loc.ClaudeSettings, map[string]any{"env": map[string]string{
+		"ANTHROPIC_BASE_URL": ok.URL, "ANTHROPIC_AUTH_TOKEN": "test-gateway-key",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := syncModels(cfg, loc, &saved, "claude"); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := saved.LastErrorByHost["claude"]; exists {
+		t.Fatalf("Claude's error survived its success: %+v", saved)
+	}
+	if saved.LastErrorByHost["codex"] != "older codex failure" || saved.LastError != "older codex failure" {
+		t.Fatalf("Codex's error was cleared by Claude's sync: %+v", saved)
+	}
+}
+
+func TestStatusPublishesEachHostsError(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.Enabled = true
+	loc := testLocations(t)
+	saved := state{
+		LastError:       "codex failed",
+		LastErrorByHost: map[string]string{"codex": "codex failed"},
+	}
+	out := status(cfg, loc, saved, "claude")
+	errors, ok := out["lastErrorByHost"].(map[string]string)
+	if !ok || errors["codex"] != "codex failed" {
+		t.Fatalf("status lost the per-host error: %+v", out["lastErrorByHost"])
+	}
+}
+
 func TestZeroIntervalAndSharedLocations(t *testing.T) {
 	loc := testLocations(t)
 	cfg := defaultConfig()
