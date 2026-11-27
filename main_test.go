@@ -999,3 +999,42 @@ func TestNormalizeDerivesWindowFromOutputCap(t *testing.T) {
 		t.Errorf("a model with no numbers should stay at 0, got %d", byID["none"])
 	}
 }
+
+// TestApplyClaudeRetiresUnusedDerivedWindows guards the cleanup that turns an
+// older four-rows-per-model projection back into the current list.  A derived
+// id no current route names cannot be resolved by the client, so a window
+// under it is dead weight; an entry with any other field belongs to the user.
+func TestApplyClaudeRetiresUnusedDerivedWindows(t *testing.T) {
+	loc := testLocations(t)
+	stale := "claude-mythos-abcdef"
+	if err := writeJSON(loc.ClaudeSettings, map[string]any{
+		"modelSettings": map[string]any{
+			stale:                      map[string]any{"autoCompactWindow": 200000},
+			"claude-mythos-abcdef[1m]": map[string]any{"autoCompactWindow": 200000},
+			"user-entry":               map[string]any{"autoCompactWindow": 100000, "other": "keep"},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	managed := managedState{}
+	if err := applyClaude([]model{{ID: "current", Label: "current", Window: 500000}}, loc, &managed, "derived"); err != nil {
+		t.Fatal(err)
+	}
+	var settings map[string]json.RawMessage
+	if err := readJSON(loc.ClaudeSettings, &settings); err != nil {
+		t.Fatal(err)
+	}
+	var windows map[string]json.RawMessage
+	if err := json.Unmarshal(settings["modelSettings"], &windows); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := windows[stale]; ok {
+		t.Errorf("unused derived window %q survived", stale)
+	}
+	if _, ok := windows[stale+"[1m]"]; ok {
+		t.Errorf("unused derived window %q survived", stale+"[1m]")
+	}
+	if _, ok := windows["user-entry"]; !ok {
+		t.Errorf("a user's modelSettings entry was removed")
+	}
+}
